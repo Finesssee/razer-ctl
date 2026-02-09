@@ -96,7 +96,7 @@ pub const SUPPORTED: &[Descriptor] = &[
     },
     Descriptor {
         model_number_prefix: "RZ09-05286",
-        name: "Razer Blade 16” (2025) 5070",
+        name: "Razer Blade 16 (2025) 5070",
         pid: 0x02c6,
         features: &[
             "battery-care",
