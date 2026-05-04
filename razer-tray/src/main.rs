@@ -90,7 +90,7 @@ impl DeviceState {
             librazer::types::PerfMode::Hyperboost => {
                 let cpu_boost = command::get_cpu_boost(device)?;
                 let gpu_boost = command::get_gpu_boost(device)?;
-                if cpu_boost == CpuBoost::Boost
+                if cpu_boost == CpuBoost::Undervolt
                     && gpu_boost == GpuBoost::High
                     && fan_speed == FanSpeed::Manual(5100)
                 {
@@ -169,7 +169,7 @@ impl DeviceState {
                 )
             } else {
                 PerfMode::Custom(
-                    cpu_boost.unwrap_or(CpuBoost::Boost),
+                    cpu_boost.unwrap_or(CpuBoost::Undervolt),
                     gpu_boost.unwrap_or(GpuBoost::High)
                 )
             },
@@ -666,7 +666,7 @@ impl ProgramState {
                 PerfMode::Balanced => PerfMode::Performance,
                 PerfMode::Performance => PerfMode::Hyperboost,
                 PerfMode::Hyperboost => {
-                    PerfMode::Custom(CpuBoost::Boost, GpuBoost::High)
+                PerfMode::Custom(CpuBoost::Undervolt, GpuBoost::High)
                 }
                 PerfMode::Custom(..) => PerfMode::Battery,
             },

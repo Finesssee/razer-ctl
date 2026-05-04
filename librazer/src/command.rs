@@ -88,7 +88,7 @@ pub fn set_gpu_boost(device: &Device, boost: GpuBoost) -> Result<()> {
 pub fn set_max_performance_profile(device: &Device) -> Result<()> {
     set_perf_mode(device, PerfMode::Hyperboost)?;
     thread::sleep(time::Duration::from_millis(500));
-    set_cpu_boost(device, CpuBoost::Boost)?;
+    set_cpu_boost(device, CpuBoost::Undervolt)?;
     thread::sleep(time::Duration::from_millis(100));
     set_gpu_boost(device, GpuBoost::High)?;
     thread::sleep(time::Duration::from_millis(100));

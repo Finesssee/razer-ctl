@@ -33,14 +33,14 @@ keeping Synapse installed or running:
 `profile max` applies:
 
 * HyperBoost performance mode
-* CPU Boost
+* CPU Undervolt
 * GPU High
 * Manual fan control at 5100 RPM
 * Keyboard brightness 255
 * Lights always-on enabled
 
 `auto status` prints the EC state plus NVIDIA power limits, so the expected max
-state should include `Performance: Ok((Hyperboost, Manual))`, `CPU: Ok(Boost)`,
+state should include `Performance: Ok((Hyperboost, Manual))`, `CPU: Ok(Undervolt)`,
 `GPU: Ok(High)`, and `NVIDIA Current Power Limit : 175.00 W` on a supported
 Razer Blade 16 2023 RTX 4090 configuration.
 

@@ -197,7 +197,7 @@ impl Cli for ProfileCommand {
         Some(
             clap::Command::new(self.name())
                 .about("Apply complete laptop profiles")
-                .subcommand(clap::Command::new("max").about("Synapse-derived max: HyperBoost, CPU Boost, GPU High, manual 5100 RPM fan, max keyboard brightness"))
+                .subcommand(clap::Command::new("max").about("Synapse-derived max: HyperBoost, CPU Undervolt, GPU High, manual 5100 RPM fan, max keyboard brightness"))
                 .subcommand(clap::Command::new("balanced").about("Balanced performance with EC-managed fans and max keyboard brightness"))
                 .subcommand(clap::Command::new("silent").about("Silent performance with EC-managed fans and max keyboard brightness"))
                 .arg_required_else_help(true),
@@ -367,7 +367,7 @@ impl Cli for feature::Perf {
         Some(
             clap::Command::new(self.name())
                 .about("Control performance modes")
-                .subcommand(clap::Command::new("max").about("Apply max performance profile: HyperBoost, CPU Boost, GPU High, manual 5100 RPM fan"))
+                .subcommand(clap::Command::new("max").about("Apply max performance profile: HyperBoost, CPU Undervolt, GPU High, manual 5100 RPM fan"))
                 .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(PerfMode)}, "mode", "MODE", "Set performance mode", "Performance mode"})
                 .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(CpuBoost)}, "cpu", "CPU", "Set CPU boost", "CPU boost"})
                 .subcommand( impl_unary_cmd_cli!{{clap::value_parser!(GpuBoost)}, "gpu", "GPU", "Set GPU boost", "GPU boost"})
