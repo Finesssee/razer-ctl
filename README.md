@@ -12,12 +12,45 @@ The supported devices are :
 ## What can it control?
 
 * Performance modes (including overclock & Hyperboost)
+* Complete profiles for replacing Synapse (`profile max`, `profile balanced`, `profile silent`)
 * **Battery care (charge limiting)** - 50%, 55%, 60%, 65%, 70%, 75%, 80%, or disabled (100%)
 * Fan control (auto/manual with RPM settings)
 * Lid logo modes: off, static, breathing
 * Keyboard brightness (works on Windows with Fn keys anyway)
 * Lights always-on toggle
 * dGPU process termination (battery saving)
+
+## Synapse replacement workflow
+
+The CLI can apply the high-performance state captured from Razer Synapse without
+keeping Synapse installed or running:
+
+```powershell
+.\target\release\razer-cli.exe auto profile max
+.\target\release\razer-cli.exe auto status
+```
+
+`profile max` applies:
+
+* HyperBoost performance mode
+* CPU Boost
+* GPU High
+* Manual fan control at 5100 RPM
+* Keyboard brightness 255
+* Lights always-on enabled
+
+`auto status` prints the EC state plus NVIDIA power limits, so the expected max
+state should include `Performance: Ok((Hyperboost, Manual))`, `CPU: Ok(Boost)`,
+`GPU: Ok(High)`, and `NVIDIA Current Power Limit : 175.00 W` on a supported
+Razer Blade 16 2023 RTX 4090 configuration.
+
+To make `razer-ctl` own the laptop after reboot:
+
+```powershell
+.\target\release\razer-cli.exe auto startup enable-max
+.\target\release\razer-cli.exe auto startup enable-tray
+.\target\release\razer-cli.exe auto startup status
+```
 
 ![](data/demo.gif)
 

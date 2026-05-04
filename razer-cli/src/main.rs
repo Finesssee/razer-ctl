@@ -184,6 +184,135 @@ impl Cli for CustomCommand {
     }
 }
 
+struct ProfileCommand;
+
+impl Feature for ProfileCommand {
+    fn name(&self) -> &'static str {
+        "profile"
+    }
+}
+
+impl Cli for ProfileCommand {
+    fn cmd(&self) -> Option<Command> {
+        Some(
+            clap::Command::new(self.name())
+                .about("Apply complete laptop profiles")
+                .subcommand(clap::Command::new("max").about("Synapse-derived max: HyperBoost, CPU Boost, GPU High, manual 5100 RPM fan, max keyboard brightness"))
+                .subcommand(clap::Command::new("balanced").about("Balanced performance with EC-managed fans and max keyboard brightness"))
+                .subcommand(clap::Command::new("silent").about("Silent performance with EC-managed fans and max keyboard brightness"))
+                .arg_required_else_help(true),
+        )
+    }
+
+    fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+        match matches.subcommand() {
+            Some((ident, matches)) if ident == self.name() => match matches.subcommand() {
+                Some(("max", _)) => command::set_max_performance_profile(device),
+                Some(("balanced", _)) => command::set_balanced_profile(device),
+                Some(("silent", _)) => command::set_silent_profile(device),
+                _ => Ok(()),
+            },
+            _ => Ok(()),
+        }
+    }
+}
+
+struct StatusCommand;
+
+impl Feature for StatusCommand {
+    fn name(&self) -> &'static str {
+        "status"
+    }
+}
+
+impl Cli for StatusCommand {
+    fn cmd(&self) -> Option<Command> {
+        Some(clap::Command::new(self.name()).about("Show EC state and NVIDIA power limits"))
+    }
+
+    fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+        match matches.subcommand() {
+            Some((ident, _)) if ident == self.name() => {
+                println!("Device: {:?}", device.info);
+                println!("lid-logo: {:?}", command::get_logo_mode(device));
+                println!("lights-always-on: {:?}", command::get_lights_always_on(device));
+                println!("kbd-backlight: {:?}", command::get_keyboard_brightness(device));
+
+                match command::get_perf_mode(device) {
+                    Ok((perf_mode, fan_mode)) => {
+                        println!("Performance: Ok(({:?}, {:?}))", perf_mode, fan_mode);
+                        if matches!(perf_mode, PerfMode::Custom | PerfMode::Hyperboost) {
+                            println!("CPU: {:?}", command::get_cpu_boost(device));
+                            println!("GPU: {:?}", command::get_gpu_boost(device));
+                        }
+
+                        match fan_mode {
+                            FanMode::Auto => println!("Fan: Auto"),
+                            FanMode::Manual => println!(
+                                "Fan set to: Manual@{:?} RPM",
+                                command::get_fan_rpm(device, FanZone::Zone1)
+                            ),
+                        }
+                    }
+                    Err(e) => println!("Performance: Err({})", e),
+                }
+
+                println!(
+                    "Fan actual: {:?} RPM",
+                    command::get_fan_actual_rpm(device, FanZone::Zone1)
+                );
+
+                print_nvidia_power_limits();
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+struct StartupCommand;
+
+impl Feature for StartupCommand {
+    fn name(&self) -> &'static str {
+        "startup"
+    }
+}
+
+impl Cli for StartupCommand {
+    fn cmd(&self) -> Option<Command> {
+        Some(
+            clap::Command::new(self.name())
+                .about("Manage Windows login startup entries")
+                .subcommand(clap::Command::new("enable-max").about("Apply max profile at Windows login"))
+                .subcommand(clap::Command::new("disable-max").about("Remove max-profile startup entry"))
+                .subcommand(clap::Command::new("enable-tray").about("Launch razer-tray at Windows login"))
+                .subcommand(clap::Command::new("disable-tray").about("Remove tray startup entry"))
+                .subcommand(clap::Command::new("status").about("Show configured startup entries"))
+                .arg_required_else_help(true),
+        )
+    }
+
+    fn handle(&self, _device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+        match matches.subcommand() {
+            Some((ident, matches)) if ident == self.name() => match matches.subcommand() {
+                Some(("enable-max", _)) => set_startup_entry(
+                    STARTUP_MAX_VALUE,
+                    &format!("\"{}\" auto profile max", current_cli_path()?.display()),
+                ),
+                Some(("disable-max", _)) => remove_startup_entry(STARTUP_MAX_VALUE),
+                Some(("enable-tray", _)) => set_startup_entry(
+                    STARTUP_TRAY_VALUE,
+                    &format!("\"{}\"", current_tray_path()?.display()),
+                ),
+                Some(("disable-tray", _)) => remove_startup_entry(STARTUP_TRAY_VALUE),
+                Some(("status", _)) => print_startup_status(),
+                _ => Ok(()),
+            },
+            _ => Ok(()),
+        }
+    }
+}
+
 impl Cli for feature::Fan {
     fn cmd(&self) -> Option<Command> {
         Some(
@@ -237,6 +366,7 @@ impl Cli for feature::Perf {
         Some(
             clap::Command::new(self.name())
                 .about("Control performance modes")
+                .subcommand(clap::Command::new("max").about("Apply max performance profile: HyperBoost, CPU Boost, GPU High, manual 5100 RPM fan"))
                 .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(PerfMode)}, "mode", "MODE", "Set performance mode", "Performance mode"})
                 .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(CpuBoost)}, "cpu", "CPU", "Set CPU boost", "CPU boost"})
                 .subcommand( impl_unary_cmd_cli!{{clap::value_parser!(GpuBoost)}, "gpu", "GPU", "Set GPU boost", "GPU boost"})
@@ -247,6 +377,10 @@ impl Cli for feature::Perf {
     fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, matches)) if ident == self.name() => {
+                match matches.subcommand() {
+                    Some(("max", _)) => command::set_max_performance_profile(device)?,
+                    _ => (),
+                }
                 impl_unary_handle_cli! {<PerfMode>(matches, device, "mode", "MODE", command::set_perf_mode)}
                 impl_unary_handle_cli! {<CpuBoost>(matches, device, "cpu", "CPU", command::set_cpu_boost)}
                 impl_unary_handle_cli! {<GpuBoost>(matches, device, "gpu", "GPU", command::set_gpu_boost)}
@@ -255,14 +389,15 @@ impl Cli for feature::Perf {
             Some(("info", _)) => {
                 let perf_mode = command::get_perf_mode(device);
                 println!("Performance: {:?}", perf_mode);
-                if let Ok((PerfMode::Custom, _)) = perf_mode {
+                if let Ok((PerfMode::Custom | PerfMode::Hyperboost, _)) = perf_mode {
                     let cpu_boost = command::get_cpu_boost(device);
                     let gpu_boost = command::get_gpu_boost(device);
                     println!("CPU: {:?}", cpu_boost);
                     println!("GPU: {:?}", gpu_boost);
 
-                    if let (Ok(CpuBoost::Boost) | Ok(CpuBoost::Undervolt), Ok(GpuBoost::High)) =
-                        (cpu_boost, gpu_boost)
+                    if matches!(perf_mode, Ok((PerfMode::Custom, _)))
+                        && matches!(cpu_boost, Ok(CpuBoost::Boost) | Ok(CpuBoost::Undervolt))
+                        && matches!(gpu_boost, Ok(GpuBoost::High))
                     {
                         println!(
                             "Max Fan Speed: {:?}",
@@ -342,6 +477,104 @@ fn taskkill() -> Result<()> {
     Ok(())
 }
 
+fn print_nvidia_power_limits() {
+    match procCommand::new("nvidia-smi")
+        .args(["-q", "-d", "POWER"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("Instantaneous Power Draw")
+                    || trimmed.starts_with("Current Power Limit")
+                    || trimmed.starts_with("Default Power Limit")
+                    || trimmed.starts_with("Max Power Limit")
+                {
+                    if !trimmed.ends_with(": N/A") {
+                        println!("NVIDIA {}", trimmed);
+                    }
+                }
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!("NVIDIA power: unavailable ({})", stderr.trim());
+        }
+        Err(e) => println!("NVIDIA power: unavailable ({})", e),
+    }
+}
+
+const STARTUP_MAX_VALUE: &str = "razer-ctl max profile";
+const STARTUP_TRAY_VALUE: &str = "razer-ctl tray";
+
+fn current_cli_path() -> Result<std::path::PathBuf> {
+    Ok(std::env::current_exe()?)
+}
+
+fn current_tray_path() -> Result<std::path::PathBuf> {
+    let cli_path = current_cli_path()?;
+    Ok(cli_path.with_file_name("razer-tray.exe"))
+}
+
+#[cfg(windows)]
+fn startup_run_key() -> Result<winreg::RegKey> {
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = hkcu.create_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")?;
+    Ok(key)
+}
+
+#[cfg(windows)]
+fn set_startup_entry(name: &str, command: &str) -> Result<()> {
+    let key = startup_run_key()?;
+    key.set_value(name, &command)?;
+    println!("Startup entry set: {} = {}", name, command);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_startup_entry(_name: &str, _command: &str) -> Result<()> {
+    anyhow::bail!("startup management is only supported on Windows")
+}
+
+#[cfg(windows)]
+fn remove_startup_entry(name: &str) -> Result<()> {
+    let key = startup_run_key()?;
+    match key.delete_value(name) {
+        Ok(()) => println!("Startup entry removed: {}", name),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("Startup entry not present: {}", name)
+        }
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn remove_startup_entry(_name: &str) -> Result<()> {
+    anyhow::bail!("startup management is only supported on Windows")
+}
+
+#[cfg(windows)]
+fn print_startup_status() -> Result<()> {
+    let key = startup_run_key()?;
+    for name in [STARTUP_MAX_VALUE, STARTUP_TRAY_VALUE] {
+        match key.get_value::<String, _>(name) {
+            Ok(command) => println!("{} = {}", name, command),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("{} = <not set>", name),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn print_startup_status() -> Result<()> {
+    anyhow::bail!("startup management is only supported on Windows")
+}
+
 fn update_cmd(cmd: Command, features: &[Box<dyn Cli>]) -> Command {
     features
         .iter()
@@ -404,6 +637,9 @@ fn main() -> Result<()> {
 
     let mut cli_features: Vec<Box<dyn Cli>> = gen_cli_features(feature_list);
     cli_features.push(Box::new(CustomCommand));
+    cli_features.push(Box::new(ProfileCommand));
+    cli_features.push(Box::new(StatusCommand));
+    cli_features.push(Box::new(StartupCommand));
 
     let cmd = clap::command!()
         .color(clap::ColorChoice::Always)

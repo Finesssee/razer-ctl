@@ -39,6 +39,7 @@ enum FanSpeed {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum PerfMode {
+    Max,
     Battery,
     Silent,
     Balanced,
@@ -110,6 +111,7 @@ impl DeviceState {
 
     fn apply(&self, device: &device::Device) -> Result<()> {
         match self.perf_mode {
+            PerfMode::Max => command::set_max_performance_profile(device),
             PerfMode::Battery => command::set_perf_mode(device, librazer::types::PerfMode::Battery),
             PerfMode::Silent => command::set_perf_mode(device, librazer::types::PerfMode::Silent),
             PerfMode::Balanced => command::set_perf_mode(device, librazer::types::PerfMode::Balanced),
@@ -157,6 +159,43 @@ impl DeviceState {
                     cpu_boost.unwrap_or(CpuBoost::Boost),
                     gpu_boost.unwrap_or(GpuBoost::High)
                 )
+            },
+            ..*self
+        }
+    }
+
+    fn max_profile(&self) -> Self {
+        Self {
+            perf_mode: PerfMode::Max,
+            fan_speed: FanSpeed::Manual(5100),
+            lights_mode: LightsMode {
+                keyboard_brightness: 255,
+                always_on: LightsAlwaysOn::Enable,
+                ..self.lights_mode
+            },
+            ..*self
+        }
+    }
+
+    fn balanced_profile(&self) -> Self {
+        Self {
+            perf_mode: PerfMode::Balanced,
+            fan_speed: FanSpeed::Auto,
+            lights_mode: LightsMode {
+                keyboard_brightness: 255,
+                ..self.lights_mode
+            },
+            ..*self
+        }
+    }
+
+    fn silent_profile(&self) -> Self {
+        Self {
+            perf_mode: PerfMode::Silent,
+            fan_speed: FanSpeed::Auto,
+            lights_mode: LightsMode {
+                keyboard_brightness: 255,
+                ..self.lights_mode
             },
             ..*self
         }
@@ -247,6 +286,20 @@ impl ProgramState {
         let mut event_handlers = std::collections::HashMap::new();
         let menu = Menu::new();
         // header
+
+        // complete profiles
+        let profiles = Submenu::new("Profiles", true);
+        let profile_items = [
+            ("profile:max", "Max (Synapse replacement)", dstate.max_profile()),
+            ("profile:balanced", "Balanced", dstate.balanced_profile()),
+            ("profile:silent", "Silent", dstate.silent_profile()),
+        ];
+        for (event_id, label, state) in profile_items {
+            profiles.append(&MenuItem::with_id(event_id, label, true, None))?;
+            event_handlers.insert(event_id.to_string(), state);
+        }
+        menu.append(&profiles)?;
+        menu.append(&PredefinedMenuItem::separator())?;
 
         // perf
         let perf_modes = Submenu::new("Performance", true);
@@ -392,6 +445,10 @@ impl ProgramState {
             "fan_speeds:auto".to_string(),
             DeviceState {
                 fan_speed: FanSpeed::Auto,
+                perf_mode: match dstate.perf_mode {
+                    PerfMode::Max => PerfMode::Hyperboost,
+                    mode => mode,
+                },
                 ..*dstate
             },
         );
@@ -581,6 +638,7 @@ impl ProgramState {
     fn get_next_perf_mode(&self) -> DeviceState {
         DeviceState {
             perf_mode: match self.device_state.perf_mode {
+                PerfMode::Max => PerfMode::Battery,
                 PerfMode::Battery => PerfMode::Silent,
                 PerfMode::Silent => PerfMode::Balanced,
                 PerfMode::Balanced => PerfMode::Performance,
@@ -600,6 +658,7 @@ impl ProgramState {
         let mut status = String::new();
 
         match self.device_state.perf_mode {
+            PerfMode::Max => writeln!(&mut info, "Max")?,
             PerfMode::Battery => writeln!(&mut info, "Battery")?,
             PerfMode::Silent => writeln!(&mut info, "Silent")?,
             PerfMode::Balanced => writeln!(&mut info, "Balanced")?,
@@ -665,6 +724,7 @@ impl ProgramState {
         let razer_violet = include_bytes!("../icons/razer-violet.png");
 
         let image = match self.device_state.perf_mode {
+            PerfMode::Max => image::load_from_memory(razer_violet),
             PerfMode::Battery => image::load_from_memory(razer_blue),
             PerfMode::Silent => image::load_from_memory(razer_yellow),
             PerfMode::Balanced => image::load_from_memory(razer_green),

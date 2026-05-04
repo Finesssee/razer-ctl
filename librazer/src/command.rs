@@ -6,6 +6,7 @@ use crate::types::{
 };
 
 use anyhow::{bail, ensure, Result};
+use std::{thread, time};
 
 fn _send_command(device: &Device, command: u16, args: &[u8]) -> Result<Packet> {
     let response = device.send(Packet::new(command, args))?;
@@ -27,10 +28,12 @@ fn _set_perf_mode(device: &Device, perf_mode: PerfMode, fan_mode: FanMode) -> Re
 
 fn _set_boost(device: &Device, cluster: Cluster, boost: u8) -> Result<()> {
     let args = &[0x01, cluster as u8, boost];
+    let (perf_mode, _) = get_perf_mode(device)?;
     ensure!(
-        get_perf_mode(device)?.0 == PerfMode::Custom,
-        "Performance mode must be {:?}",
-        PerfMode::Custom
+        matches!(perf_mode, PerfMode::Custom | PerfMode::Hyperboost),
+        "Performance mode must be {:?} or {:?}",
+        PerfMode::Custom,
+        PerfMode::Hyperboost
     );
     ensure!(device
         .send(Packet::new(0x0d07, args))?
@@ -80,6 +83,30 @@ pub fn set_cpu_boost(device: &Device, boost: CpuBoost) -> Result<()> {
 
 pub fn set_gpu_boost(device: &Device, boost: GpuBoost) -> Result<()> {
     _set_boost(device, Cluster::Gpu, boost as u8)
+}
+
+pub fn set_max_performance_profile(device: &Device) -> Result<()> {
+    set_perf_mode(device, PerfMode::Hyperboost)?;
+    thread::sleep(time::Duration::from_millis(500));
+    set_cpu_boost(device, CpuBoost::Boost)?;
+    thread::sleep(time::Duration::from_millis(100));
+    set_gpu_boost(device, GpuBoost::High)?;
+    thread::sleep(time::Duration::from_millis(100));
+    set_fan_mode(device, FanMode::Manual)?;
+    thread::sleep(time::Duration::from_millis(100));
+    set_fan_rpm(device, 5100, false)?;
+    set_keyboard_brightness(device, 255)?;
+    set_lights_always_on(device, LightsAlwaysOn::Enable)
+}
+
+pub fn set_balanced_profile(device: &Device) -> Result<()> {
+    set_perf_mode(device, PerfMode::Balanced)?;
+    set_keyboard_brightness(device, 255)
+}
+
+pub fn set_silent_profile(device: &Device) -> Result<()> {
+    set_perf_mode(device, PerfMode::Silent)?;
+    set_keyboard_brightness(device, 255)
 }
 
 pub fn get_cpu_boost(device: &Device) -> Result<CpuBoost> {

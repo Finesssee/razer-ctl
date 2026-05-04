@@ -94,7 +94,16 @@ impl Device {
 
             let response_size = self.device.get_feature_report(&mut response_buf)?;
             if response_buf.len() != response_size {
-                return Err(anyhow!("Response size != {}", response_buf.len()));
+                if attempt == MAX_RETRIES - 1 {
+                    return Err(anyhow!(
+                        "Response size {} != {}",
+                        response_size,
+                        response_buf.len()
+                    ));
+                }
+
+                thread::sleep(time::Duration::from_millis(500));
+                continue;
             }
 
             // skip report id byte
