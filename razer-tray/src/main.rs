@@ -982,7 +982,11 @@ fn init_logging_to_file() -> Result<()> {
     Ok(())
 }
 
-fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<ProgramState> {
+fn init(
+    tray_icon: &mut tray_icon::TrayIcon,
+    device: &device::Device,
+    force_ac_max_profile: bool,
+) -> Result<ProgramState> {
     log::info!(
         "loading config file {}",
         confy::get_configuration_file_path(PKG_NAME, None)?.display()
@@ -992,7 +996,9 @@ fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<
     let ac_power = get_power_state()?;
     let active_device_state = DeviceState::read(device)?;
 
-    if ac_power && active_device_state.perf_mode == PerfMode::Max {
+    if ac_power && force_ac_max_profile {
+        config.ac_state = config.ac_state.max_profile();
+    } else if ac_power && active_device_state.perf_mode == PerfMode::Max {
         config.ac_state = active_device_state;
     }
 
@@ -1069,7 +1075,8 @@ fn main() -> Result<()> {
 
     let mut tray_icon = TrayIconBuilder::new().build()?;
 
-    let mut state: ProgramState = init(&mut tray_icon, &device)?;
+    let force_ac_max_profile = std::env::args().any(|arg| arg == "--profile=max" || arg == "--max");
+    let mut state: ProgramState = init(&mut tray_icon, &device, force_ac_max_profile)?;
 
     let menu_channel = MenuEvent::receiver();
     let tray_channel = TrayIconEvent::receiver();
@@ -1133,7 +1140,7 @@ fn main() -> Result<()> {
             Ok(())
         })() {
             log::error!("trying to recover from: {:?}", e);
-            match init(&mut tray_icon, &device) {
+            match init(&mut tray_icon, &device, force_ac_max_profile) {
                 Ok(new_state) => {
                     state = new_state;
                 },

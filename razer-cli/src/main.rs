@@ -303,7 +303,7 @@ impl Cli for StartupCommand {
                 Some(("disable-max", _)) => remove_startup_entry(STARTUP_MAX_VALUE),
                 Some(("enable-tray", _)) => set_startup_entry(
                     STARTUP_TRAY_VALUE,
-                    &format!("\"{}\"", current_tray_path()?.display()),
+                    &format!("\"{}\" --profile=max", current_tray_path()?.display()),
                 ),
                 Some(("disable-tray", _)) => remove_startup_entry(STARTUP_TRAY_VALUE),
                 Some(("status", _)) => print_startup_status(),
