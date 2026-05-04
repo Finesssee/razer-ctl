@@ -73,26 +73,39 @@ type Result<T> = std::result::Result<T, Error>;
 
 impl DeviceState {
     fn read(device: &device::Device) -> Result<Self> {
-        let perf_mode = match command::get_perf_mode(device)? {
-            (librazer::types::PerfMode::Battery, _) => PerfMode::Battery,
-            (librazer::types::PerfMode::Silent, _) => PerfMode::Silent,
-            (librazer::types::PerfMode::Balanced, _) => PerfMode::Balanced,
-            (librazer::types::PerfMode::Performance, _) => PerfMode::Performance,
-            (librazer::types::PerfMode::Hyperboost, _) => PerfMode::Hyperboost,
-            (librazer::types::PerfMode::Custom, _) => {
+        let (raw_perf_mode, fan_mode) = command::get_perf_mode(device)?;
+        let fan_speed = match fan_mode {
+            FanMode::Auto => FanSpeed::Auto,
+            FanMode::Manual => {
+                let rpm = command::get_fan_rpm(device, librazer::types::FanZone::Zone1)?;
+                FanSpeed::Manual(rpm)
+            }
+        };
+
+        let perf_mode = match raw_perf_mode {
+            librazer::types::PerfMode::Battery => PerfMode::Battery,
+            librazer::types::PerfMode::Silent => PerfMode::Silent,
+            librazer::types::PerfMode::Balanced => PerfMode::Balanced,
+            librazer::types::PerfMode::Performance => PerfMode::Performance,
+            librazer::types::PerfMode::Hyperboost => {
+                let cpu_boost = command::get_cpu_boost(device)?;
+                let gpu_boost = command::get_gpu_boost(device)?;
+                if cpu_boost == CpuBoost::Boost
+                    && gpu_boost == GpuBoost::High
+                    && fan_speed == FanSpeed::Manual(5100)
+                {
+                    PerfMode::Max
+                } else {
+                    PerfMode::Hyperboost
+                }
+            }
+            librazer::types::PerfMode::Custom => {
                 let cpu_boost = command::get_cpu_boost(device)?;
                 let gpu_boost = command::get_gpu_boost(device)?;
                 PerfMode::Custom(cpu_boost, gpu_boost)
             }
         };
 
-        let fan_speed = match command::get_perf_mode(device)? {
-            (_,FanMode::Auto) => FanSpeed::Auto,
-            (_,FanMode::Manual) => {
-                let rpm = command::get_fan_rpm(device, librazer::types::FanZone::Zone1)?;
-                FanSpeed::Manual(rpm)
-            }
-        };
         let lights_mode = LightsMode {
             logo_mode: command::get_logo_mode(device)?,
             keyboard_brightness: command::get_keyboard_brightness(device)?,
@@ -242,7 +255,16 @@ struct ConfigState {
 impl Default for ConfigState {
     fn default() -> Self {
         Self {
-            ac_state: DeviceState {..Default::default()},
+            ac_state: DeviceState {
+                perf_mode: PerfMode::Max,
+                fan_speed: FanSpeed::Manual(5100),
+                lights_mode: LightsMode {
+                    logo_mode: LogoMode::Off,
+                    keyboard_brightness: 255,
+                    always_on: LightsAlwaysOn::Enable,
+                },
+                ..Default::default()
+            },
             battery_state : DeviceState {
                     perf_mode : PerfMode::Battery,
                     ..Default::default()
@@ -965,10 +987,17 @@ fn init(tray_icon: &mut tray_icon::TrayIcon, device: &device::Device) -> Result<
         "loading config file {}",
         confy::get_configuration_file_path(PKG_NAME, None)?.display()
     );
-    let config: ConfigState = confy::load(PKG_NAME, None).unwrap_or_default();
+    let mut config: ConfigState = confy::load(PKG_NAME, None).unwrap_or_default();
     let fan_actual = get_fan_rpm(device)?;
+    let ac_power = get_power_state()?;
+    let active_device_state = DeviceState::read(device)?;
+
+    if ac_power && active_device_state.perf_mode == PerfMode::Max {
+        config.ac_state = active_device_state;
+    }
+
     let mut state = ProgramState::new(config.ac_state, fan_actual)?;
-    state.ac_power = get_power_state()?;
+    state.ac_power = ac_power;
     state.ac_state = config.ac_state.clone();
     state.battery_state = config.battery_state.clone();
     if state.ac_power == false {

@@ -263,6 +263,7 @@ impl Cli for StatusCommand {
                 );
 
                 print_nvidia_power_limits();
+                print_razer_conflicts();
                 Ok(())
             }
             _ => Ok(()),
@@ -502,6 +503,31 @@ fn print_nvidia_power_limits() {
             println!("NVIDIA power: unavailable ({})", stderr.trim());
         }
         Err(e) => println!("NVIDIA power: unavailable ({})", e),
+    }
+}
+
+fn print_razer_conflicts() {
+    let mut system = System::new_all();
+    system.refresh_processes();
+
+    let mut found = false;
+    for process in system.processes().values() {
+        let name = process.name();
+        if name.contains("RazerAppEngine")
+            || name.contains("Synapse")
+            || name.contains("RazerCentral")
+            || name.contains("Cortex")
+        {
+            if !found {
+                println!("Razer process conflicts:");
+                found = true;
+            }
+            println!("  {} ({})", name, process.pid());
+        }
+    }
+
+    if !found {
+        println!("Razer process conflicts: none detected");
     }
 }
 
