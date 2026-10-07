@@ -11,7 +11,7 @@ The supported devices are :
 
 ## What can it control?
 
-* Performance modes (including Synapse overclock & Hyperboost)
+* Performance modes (including Hyperboost)
 * Complete profiles for replacing Synapse (`profile max`, `profile balanced`, `profile silent`)
 * **Battery care (charge limiting)** - 50%, 55%, 60%, 65%, 70%, 75%, 80%, or disabled (100%)
 * Fan control (auto/manual with RPM settings)
@@ -39,15 +39,15 @@ keeping Synapse installed or running:
 * Keyboard brightness 255
 * Lights always-on enabled
 
-`auto status` prints the EC state plus NVIDIA power limits, so the expected max
-state should include `Performance: Ok((Hyperboost, Manual))`, `CPU: Ok(High)`,
-`GPU: Ok(High)`, and `NVIDIA Current Power Limit : 175.00 W` on a supported
-Razer Blade 16 2023 RTX 4090 configuration.
+`auto status` prints the EC state plus NVIDIA power limits, so after `profile max`
+it should show `Performance   hyperboost (CPU high, GPU high)` and a GPU power
+limit of 175 W on a supported Razer Blade 16 2023 RTX 4090 configuration.
 
-The captured EC CPU value `4` is exposed as `synapse-overclock`; do not treat it
-as an undervolt. The local capture table labels the same `0d07 ... 04` command
-as `custom mode, cpu overclock, gpu high`, so `profile max` keeps CPU on `High`
-by default while leaving the firmware preset available for explicit testing.
+CPU value `4` is Synapse's CPU overclock (captured as `custom mode, cpu
+overclock, gpu high` in [data/README.md](data/README.md)), not an undervolt, and
+razer-ctl does not offer it. Synapse's undervolt (CPU Voltage Optimizer) applies
+a voltage offset through Intel's tuning software instead of the EC, so razer-ctl
+cannot set it.
 
 To make `razer-ctl` own the laptop after reboot:
 

@@ -108,8 +108,8 @@ pub enum CpuBoost {
     Medium = 1,
     High = 2,
     Boost = 3,
-    #[value(name = "synapse-overclock", alias = "overclock")]
-    SynapseOverclock = 4,
+    // Value 4 is Synapse's CPU overclock (see data/README.md). It is not an undervolt, and
+    // razer-ctl deliberately does not offer it.
 }
 
 #[derive(EnumIter, Clone, Copy, Debug, ValueEnum, PartialEq, Serialize, Deserialize)]
@@ -199,7 +199,6 @@ impl TryFrom<u8> for CpuBoost {
             1 => Ok(Self::Medium),
             2 => Ok(Self::High),
             3 => Ok(Self::Boost),
-            4 => Ok(Self::SynapseOverclock),
             _ => bail!("Failed to convert {} to CpuBoost", value),
         }
     }

@@ -337,7 +337,7 @@ GPU 00000000:01:00.0
     #[test]
     fn values_use_cli_spelling() {
         assert_eq!(name(PerfMode::Hyperboost), "hyperboost");
-        assert_eq!(name(CpuBoost::SynapseOverclock), "synapse-overclock");
+        assert_eq!(name(CpuBoost::Boost), "boost");
         assert_eq!(temperatures(&[76, 56]), "CPU 76 °C, GPU 56 °C");
     }
 
