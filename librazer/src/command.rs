@@ -14,14 +14,19 @@ fn _send_command(device: &Device, command: u16, args: &[u8]) -> Result<Packet> {
     Ok(response)
 }
 
+/// Synapse 4 sleeps this long after every 0x0d02 write (`setThermalFanMode`) so the EC can
+/// settle the new mode before the next command.
+const PERF_MODE_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
 fn _set_perf_mode(device: &Device, perf_mode: PerfMode, fan_mode: FanMode) -> Result<()> {
     [1, 2].into_iter().try_for_each(|zone| {
         _send_command(
             device,
             0x0d02,
             &[0x01, zone, perf_mode as u8, fan_mode as u8],
-        )
-        .map(|_| ())
+        )?;
+        std::thread::sleep(PERF_MODE_SETTLE);
+        Ok(())
     })
 }
 
