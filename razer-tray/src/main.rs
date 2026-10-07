@@ -236,9 +236,12 @@ impl DeviceState {
                 let gpu_boost = command::get_gpu_boost(device)?;
                 PerfMode::Custom(cpu_boost, gpu_boost)
             }
-            mode @ (librazer::types::PerfMode::Gaming
-            | librazer::types::PerfMode::BatterySaver) => {
-                anyhow::bail!("Device is in {:?} mode, which razer-tray doesn't manage", mode)
+            mode
+            @ (librazer::types::PerfMode::Gaming | librazer::types::PerfMode::BatterySaver) => {
+                anyhow::bail!(
+                    "Device is in {:?} mode, which razer-tray doesn't manage",
+                    mode
+                )
             }
         };
 
@@ -490,10 +493,10 @@ fn fit_tooltip(text: &str) -> String {
 impl ProgramState {
     fn new(device_state: DeviceState, fan_last: FanRpm) -> Result<Self> {
         let (menu, event_handlers) = Self::create_menu_and_handlers(&device_state)?;
-        let fan_actual = fan_last.clone();
+        let fan_actual = fan_last;
         let ac_power = true;
-        let ac_state = device_state.clone();
-        let battery_state = device_state.clone();
+        let ac_state = device_state;
+        let battery_state = device_state;
         Ok(Self {
             device_state,
             ac_state,
@@ -993,7 +996,7 @@ impl ProgramState {
         device: &device::Device,
         bucket: ProfileBucket,
     ) -> Result<()> {
-        self.device_state = new_device_state.clone();
+        self.device_state = new_device_state;
         self.device_state.apply(device)?;
         (self.menu, self.event_handlers) = Self::create_menu_and_handlers(&self.device_state)?;
         self.fan_actual = get_fan_rpm(device)?;
@@ -1007,13 +1010,13 @@ impl ProgramState {
             );
         }
         match bucket {
-            ProfileBucket::Ac => self.ac_state = self.device_state.clone(),
-            ProfileBucket::Battery => self.battery_state = self.device_state.clone(),
+            ProfileBucket::Ac => self.ac_state = self.device_state,
+            ProfileBucket::Battery => self.battery_state = self.device_state,
         }
         confy::store(
             PKG_NAME,
             None,
-            &ConfigState {
+            ConfigState {
                 ac_state: self.ac_state,
                 battery_state: self.battery_state,
             },
@@ -1084,7 +1087,7 @@ fn gpu_taskkill() -> Result<()> {
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let output = procCommand::new("nvidia-smi")
-        .args(&["--query-compute-apps=name,pid", "--format=csv,noheader"])
+        .args(["--query-compute-apps=name,pid", "--format=csv,noheader"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .expect("Failed to execute nvidia-smi");
@@ -1230,10 +1233,10 @@ fn init(
 
     let mut state = ProgramState::new(config.ac_state, fan_actual)?;
     state.ac_power = ac_power;
-    state.ac_state = config.ac_state.clone();
-    state.battery_state = config.battery_state.clone();
-    if state.ac_power == false {
-        state.device_state = state.battery_state.clone()
+    state.ac_state = config.ac_state;
+    state.battery_state = config.battery_state;
+    if !state.ac_power {
+        state.device_state = state.battery_state
     }
     state.update(
         tray_icon,
@@ -1366,11 +1369,11 @@ fn run() -> Result<()> {
             }
 
             if state.ac_power && state.device_state != state.ac_state {
-                let new_device_state = state.ac_state.clone();
+                let new_device_state = state.ac_state;
                 log::info!("new_device_state 3 {:?}", new_device_state);
                 state.update(&mut tray_icon, new_device_state, &device, profile_bucket)?;
-            } else if state.ac_power == false && state.device_state != state.battery_state {
-                let new_device_state = state.battery_state.clone();
+            } else if !state.ac_power && state.device_state != state.battery_state {
+                let new_device_state = state.battery_state;
                 log::info!("new_device_state 3 {:?}", new_device_state);
                 state.update(&mut tray_icon, new_device_state, &device, profile_bucket)?;
             }

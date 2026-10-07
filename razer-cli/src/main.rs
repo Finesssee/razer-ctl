@@ -454,9 +454,8 @@ impl Cli for feature::Perf {
     fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, matches)) if ident == self.name() => {
-                match matches.subcommand() {
-                    Some(("max", matches)) => apply_max_profile(device, matches)?,
-                    _ => (),
+                if let Some(("max", matches)) = matches.subcommand() {
+                    apply_max_profile(device, matches)?
                 }
                 impl_unary_handle_cli! {<PerfMode>(matches, device, "mode", "MODE", command::set_perf_mode)}
                 impl_unary_handle_cli! {<CpuBoost>(matches, device, "cpu", "CPU", command::set_cpu_boost)}
@@ -516,7 +515,7 @@ fn enumerate() -> Result<()> {
 fn taskkill() -> Result<()> {
     // Run nvidia-smi to get PIDs of GPU processes
     let output = procCommand::new("nvidia-smi")
-        .args(&["--query-compute-apps=pid", "--format=csv,noheader"])
+        .args(["--query-compute-apps=pid", "--format=csv,noheader"])
         .output()
         .expect("Failed to execute nvidia-smi");
 
@@ -566,14 +565,13 @@ fn print_nvidia_power_limits() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with("Instantaneous Power Draw")
+                if (trimmed.starts_with("Instantaneous Power Draw")
                     || trimmed.starts_with("Current Power Limit")
                     || trimmed.starts_with("Default Power Limit")
-                    || trimmed.starts_with("Max Power Limit")
+                    || trimmed.starts_with("Max Power Limit"))
+                    && !trimmed.ends_with(": N/A")
                 {
-                    if !trimmed.ends_with(": N/A") {
-                        println!("NVIDIA {}", trimmed);
-                    }
+                    println!("NVIDIA {}", trimmed);
                 }
             }
         }
@@ -709,37 +707,6 @@ fn update_cmd(cmd: Command, features: &[Box<dyn Cli>]) -> Command {
         .fold(cmd, |cmd, f| cmd.subcommand(f))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tray_startup_command_does_not_force_max_profile() {
-        let command = startup_tray_command(std::path::Path::new(
-            r"D:\code\razer-ctl\target\release\razer-tray.exe",
-        ));
-
-        assert_eq!(
-            command,
-            r#""D:\code\razer-ctl\target\release\razer-tray.exe""#
-        );
-        assert!(!command.contains("--profile=max"));
-        assert!(!command.contains("--max"));
-    }
-
-    #[test]
-    fn max_startup_command_is_explicitly_separate_from_tray_startup() {
-        let command = startup_max_command(std::path::Path::new(
-            r"D:\code\razer-ctl\target\release\razer-cli.exe",
-        ));
-
-        assert_eq!(
-            command,
-            r#""D:\code\razer-ctl\target\release\razer-cli.exe" auto profile max"#
-        );
-    }
-}
-
 fn handle(
     device: &device::Device,
     matches: &clap::ArgMatches,
@@ -834,4 +801,35 @@ fn main() -> Result<()> {
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_startup_command_does_not_force_max_profile() {
+        let command = startup_tray_command(std::path::Path::new(
+            r"D:\code\razer-ctl\target\release\razer-tray.exe",
+        ));
+
+        assert_eq!(
+            command,
+            r#""D:\code\razer-ctl\target\release\razer-tray.exe""#
+        );
+        assert!(!command.contains("--profile=max"));
+        assert!(!command.contains("--max"));
+    }
+
+    #[test]
+    fn max_startup_command_is_explicitly_separate_from_tray_startup() {
+        let command = startup_max_command(std::path::Path::new(
+            r"D:\code\razer-ctl\target\release\razer-cli.exe",
+        ));
+
+        assert_eq!(
+            command,
+            r#""D:\code\razer-ctl\target\release\razer-cli.exe" auto profile max"#
+        );
+    }
 }
