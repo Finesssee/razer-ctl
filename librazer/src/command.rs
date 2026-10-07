@@ -51,6 +51,19 @@ pub fn set_perf_mode(device: &Device, perf_mode: PerfMode) -> Result<()> {
     _set_perf_mode(device, perf_mode, FanMode::Auto)
 }
 
+/// Set the performance mode and fan mode in one write.
+///
+/// Use this instead of `set_perf_mode` followed by `set_fan_mode(Manual)`: switching to
+/// Auto and straight back to Manual leaves the Blade 16 (2023) fans at the Auto speed
+/// (about 4400 RPM) while 0x0d81 still reports the manual target.
+pub fn set_perf_and_fan_mode(
+    device: &Device,
+    perf_mode: PerfMode,
+    fan_mode: FanMode,
+) -> Result<()> {
+    _set_perf_mode(device, perf_mode, fan_mode)
+}
+
 pub fn get_perf_mode(device: &Device) -> Result<(PerfMode, FanMode)> {
     let [r1, r2]: [Result<(PerfMode, FanMode)>; 2] = [1, 2].map(|zone| {
         let response = device.send(Packet::new(0x0d82, &[0, zone, 0, 0]))?;
@@ -120,10 +133,9 @@ pub fn check_adapter_for_max_profile(device: &Device) -> Result<()> {
 
 pub fn set_max_performance_profile(device: &Device) -> Result<()> {
     // No fixed waits between steps: Device::send waits while the EC reports busy.
-    set_perf_mode(device, PerfMode::Hyperboost)?;
+    set_perf_and_fan_mode(device, PerfMode::Hyperboost, FanMode::Manual)?;
     set_cpu_boost(device, CpuBoost::High)?;
     set_gpu_boost(device, GpuBoost::High)?;
-    set_fan_mode(device, FanMode::Manual)?;
     set_fan_rpm(device, 5100, false)?;
     set_keyboard_brightness(device, 255)?;
     set_lights_always_on(device, LightsAlwaysOn::Enable)

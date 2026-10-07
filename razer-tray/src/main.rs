@@ -262,32 +262,35 @@ impl DeviceState {
     }
 
     fn apply(&self, device: &device::Device) -> Result<()> {
+        use librazer::types::PerfMode as EcPerfMode;
+        // Set perf and fan mode in one write; an Auto step before Manual leaves the fans
+        // at the Auto speed (see command::set_perf_and_fan_mode).
+        let fan_mode = match self.fan_speed {
+            FanSpeed::Auto => FanMode::Auto,
+            FanSpeed::Manual(_) => FanMode::Manual,
+        };
+        let set_mode = |mode| command::set_perf_and_fan_mode(device, mode, fan_mode);
         match self.perf_mode {
             PerfMode::Max => command::set_max_performance_profile(device),
-            PerfMode::Battery => command::set_perf_mode(device, librazer::types::PerfMode::Battery),
-            PerfMode::Silent => command::set_perf_mode(device, librazer::types::PerfMode::Silent),
-            PerfMode::Balanced => {
-                command::set_perf_mode(device, librazer::types::PerfMode::Balanced)
-            }
-            PerfMode::Performance => {
-                command::set_perf_mode(device, librazer::types::PerfMode::Performance)
-            }
-            PerfMode::Hyperboost => {
-                command::set_perf_mode(device, librazer::types::PerfMode::Hyperboost)
-            }
+            PerfMode::Battery => set_mode(EcPerfMode::Battery),
+            PerfMode::Silent => set_mode(EcPerfMode::Silent),
+            PerfMode::Balanced => set_mode(EcPerfMode::Balanced),
+            PerfMode::Performance => set_mode(EcPerfMode::Performance),
+            PerfMode::Hyperboost => set_mode(EcPerfMode::Hyperboost),
             PerfMode::Custom(cpu_boost, gpu_boost) => {
-                command::set_perf_mode(device, librazer::types::PerfMode::Custom)?;
+                set_mode(EcPerfMode::Custom)?;
                 command::set_cpu_boost(device, cpu_boost)?;
                 command::set_gpu_boost(device, gpu_boost)
             }
         }?;
 
         match self.fan_speed {
-            FanSpeed::Auto => command::set_fan_mode(device, librazer::types::FanMode::Auto),
-            FanSpeed::Manual(rpm) => {
-                command::set_fan_mode(device, librazer::types::FanMode::Manual)?;
-                command::set_fan_rpm(device, rpm, false)
+            // The max profile always switches the fans to Manual.
+            FanSpeed::Auto if self.perf_mode == PerfMode::Max => {
+                command::set_fan_mode(device, FanMode::Auto)
             }
+            FanSpeed::Auto => Ok(()),
+            FanSpeed::Manual(rpm) => command::set_fan_rpm(device, rpm, false),
         }?;
 
         match self.lights_mode.logo_mode {
