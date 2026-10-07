@@ -121,6 +121,26 @@ mod tests {
     }
 
     #[test]
+    fn weak_charger_starts_gaming_profile_instead_of_max() {
+        let weak = AdapterWattage {
+            connected: Some(100),
+            recommended: Some(330),
+        };
+        let mut config = ConfigState::default();
+        config.repair_for_startup(true, true);
+
+        config.avoid_max_on_weak_charger(None);
+        assert_eq!(config.ac_state.perf_mode, PerfMode::Max);
+
+        config.avoid_max_on_weak_charger(Some(weak));
+        assert_eq!(
+            config.ac_state.perf_mode,
+            PerfMode::Custom(CpuBoost::Boost, GpuBoost::High)
+        );
+        assert_eq!(config.ac_state.fan_speed, FanSpeed::Manual(5500));
+    }
+
+    #[test]
     fn forced_max_startup_still_requires_explicit_flag() {
         let mut config = ConfigState::default();
 
@@ -472,7 +492,26 @@ impl Default for ConfigState {
     }
 }
 
+/// The charger, if it is too weak for the max profile. Matches the CLI's guard.
+fn undersized_charger(device: &device::Device) -> Option<AdapterWattage> {
+    command::get_adapter_wattage(device)
+        .ok()
+        .filter(|a| a.is_undersized())
+}
+
 impl ConfigState {
+    /// Start with the gaming profile instead of Max when the charger is too weak for Max.
+    fn avoid_max_on_weak_charger(&mut self, weak_charger: Option<AdapterWattage>) {
+        if let (PerfMode::Max, Some(adapter)) = (self.ac_state.perf_mode, weak_charger) {
+            log::warn!(
+                "charger is {:?} W, below the {:?} W the max profile needs; starting with the gaming profile",
+                adapter.connected,
+                adapter.recommended
+            );
+            self.ac_state = self.ac_state.gaming_profile();
+        }
+    }
+
     fn repair_for_startup(&mut self, ac_power: bool, force_ac_max_profile: bool) {
         if !ac_power {
             return;
@@ -1271,6 +1310,9 @@ fn init(
     let fan_actual = get_fan_rpm(device)?;
     let ac_power = get_power_state()?;
     config.repair_for_startup(ac_power, force_ac_max_profile);
+    if ac_power {
+        config.avoid_max_on_weak_charger(undersized_charger(device));
+    }
 
     let mut state = ProgramState::new(config.ac_state, fan_actual)?;
     state.ac_power = ac_power;
@@ -1399,7 +1441,20 @@ fn run() -> Result<()> {
                 } else {
                     let new_device_state = state.handle_event(event.id.as_ref())?;
                     log::info!("new_device_state 1 {:?}", new_device_state);
-                    state.update(&mut tray_icon, new_device_state, &device, profile_bucket)?;
+                    let weak_charger = (new_device_state.perf_mode == PerfMode::Max
+                        && state.device_state.perf_mode != PerfMode::Max)
+                        .then(|| undersized_charger(&device))
+                        .flatten();
+                    if let Some(adapter) = weak_charger {
+                        // The tooltip already shows the charger warning.
+                        log::warn!(
+                            "not switching to the max profile: charger is {:?} W, needs {:?} W",
+                            adapter.connected,
+                            adapter.recommended
+                        );
+                    } else {
+                        state.update(&mut tray_icon, new_device_state, &device, profile_bucket)?;
+                    }
                 }
             }
 
