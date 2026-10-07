@@ -1,12 +1,12 @@
 use crate::device::Device;
 use crate::packet::Packet;
+use crate::types::{adapter_level_watts, AdapterWattage};
 use crate::types::{
     BatteryCare, Cluster, CpuBoost, FanMode, FanZone, GpuBoost, LightsAlwaysOn, LogoMode,
-    MaxFanSpeedMode, PerfMode,
+    MaxFanSpeedMode, PerfMode, PowerFlag, Toggle,
 };
 
 use anyhow::{bail, ensure, Result};
-use std::{thread, time};
 
 fn _send_command(device: &Device, command: u16, args: &[u8]) -> Result<Packet> {
     let response = device.send(Packet::new(command, args))?;
@@ -15,7 +15,6 @@ fn _send_command(device: &Device, command: u16, args: &[u8]) -> Result<Packet> {
 }
 
 fn _set_perf_mode(device: &Device, perf_mode: PerfMode, fan_mode: FanMode) -> Result<()> {
-
     [1, 2].into_iter().try_for_each(|zone| {
         _send_command(
             device,
@@ -85,15 +84,46 @@ pub fn set_gpu_boost(device: &Device, boost: GpuBoost) -> Result<()> {
     _set_boost(device, Cluster::Gpu, boost as u8)
 }
 
+/// EC temperature sensors in degrees Celsius (0x0d85).
+/// On the Blade 16 (2023) sensor 1 tracks the CPU and sensor 2 the GPU.
+pub fn get_temperatures(device: &Device) -> Result<Vec<u8>> {
+    let response = device.send(Packet::new(0x0d85, &[0; 80]))?;
+    let args = response.get_args();
+    let count = usize::from(args[0]);
+    ensure!(count < args.len(), "Invalid sensor count {}", count);
+    Ok(args[1..=count].to_vec())
+}
+
+/// Connected and recommended charger power (0x078c).
+pub fn get_adapter_wattage(device: &Device) -> Result<AdapterWattage> {
+    let response = device.send(Packet::new(0x078c, &[0, 0]))?;
+    let args = response.get_args();
+    Ok(AdapterWattage {
+        connected: adapter_level_watts(args[0]),
+        recommended: adapter_level_watts(args[1]),
+    })
+}
+
+/// Fails when a charger weaker than the recommended one is plugged in: the max profile would
+/// then drain the battery while plugged in. Passes when the EC can't report the charger.
+pub fn check_adapter_for_max_profile(device: &Device) -> Result<()> {
+    if let Ok(adapter) = get_adapter_wattage(device) {
+        ensure!(
+            !adapter.is_undersized(),
+            "Charger is {} W but this laptop needs {} W for the max profile (use --force to apply anyway)",
+            adapter.connected.unwrap_or(0),
+            adapter.recommended.unwrap_or(0)
+        );
+    }
+    Ok(())
+}
+
 pub fn set_max_performance_profile(device: &Device) -> Result<()> {
+    // No fixed waits between steps: Device::send waits while the EC reports busy.
     set_perf_mode(device, PerfMode::Hyperboost)?;
-    thread::sleep(time::Duration::from_millis(500));
-    set_cpu_boost(device, CpuBoost::Undervolt)?;
-    thread::sleep(time::Duration::from_millis(100));
+    set_cpu_boost(device, CpuBoost::High)?;
     set_gpu_boost(device, GpuBoost::High)?;
-    thread::sleep(time::Duration::from_millis(100));
     set_fan_mode(device, FanMode::Manual)?;
-    thread::sleep(time::Duration::from_millis(100));
     set_fan_rpm(device, 5100, false)?;
     set_keyboard_brightness(device, 255)?;
     set_lights_always_on(device, LightsAlwaysOn::Enable)
@@ -145,12 +175,54 @@ pub fn get_fan_actual_rpm(device: &Device, fan_zone: FanZone) -> Result<u16> {
     Ok(response.get_args()[2] as u16 * 100)
 }
 
-
 pub fn send_command(device: &Device, command: u16, args: &[u8]) -> Result<Packet> {
     let response = device.send(Packet::new(command, args))?;
     Ok(response)
 }
 
+// 0x070f/0x078f carry a bitfield (see PowerFlag), not a single mode.
+// Writes must preserve the bits they don't own.
+pub fn get_power_flags(device: &Device) -> Result<u8> {
+    Ok(device.send(Packet::new(0x078f, &[0]))?.get_args()[0])
+}
+
+pub fn get_power_flag(device: &Device, flag: PowerFlag) -> Result<bool> {
+    Ok(get_power_flags(device)? & flag as u8 != 0)
+}
+
+pub fn set_power_flag(device: &Device, flag: PowerFlag, on: bool) -> Result<()> {
+    let flags = get_power_flags(device)?;
+    let flags = if on {
+        flags | flag as u8
+    } else {
+        flags & !(flag as u8)
+    };
+    _send_command(device, 0x070f, &[flags]).map(|_| ())
+}
+
+pub fn set_local_dimming(device: &Device, state: Toggle) -> Result<()> {
+    set_power_flag(device, PowerFlag::LocalDimming, state == Toggle::Enable)
+}
+
+pub fn get_local_dimming(device: &Device) -> Result<Toggle> {
+    Ok(toggle(get_power_flag(device, PowerFlag::LocalDimming)?))
+}
+
+pub fn set_charge_full_once(device: &Device, state: Toggle) -> Result<()> {
+    set_power_flag(device, PowerFlag::ChargeFullOnce, state == Toggle::Enable)
+}
+
+pub fn get_charge_full_once(device: &Device) -> Result<Toggle> {
+    Ok(toggle(get_power_flag(device, PowerFlag::ChargeFullOnce)?))
+}
+
+fn toggle(on: bool) -> Toggle {
+    if on {
+        Toggle::Enable
+    } else {
+        Toggle::Disable
+    }
+}
 
 pub fn set_max_fan_speed_mode(device: &Device, mode: MaxFanSpeedMode) -> Result<()> {
     ensure!(
@@ -158,11 +230,18 @@ pub fn set_max_fan_speed_mode(device: &Device, mode: MaxFanSpeedMode) -> Result<
         "Performance mode must be {:?}",
         PerfMode::Custom
     );
-    _send_command(device, 0x070f, &[mode as u8]).map(|_| ())
+    set_power_flag(
+        device,
+        PowerFlag::MaxFanSpeed,
+        mode == MaxFanSpeedMode::Enable,
+    )
 }
 
 pub fn get_max_fan_speed_mode(device: &Device) -> Result<MaxFanSpeedMode> {
-    device.send(Packet::new(0x078f, &[0]))?.get_args()[0].try_into()
+    match get_power_flag(device, PowerFlag::MaxFanSpeed)? {
+        true => Ok(MaxFanSpeedMode::Enable),
+        false => Ok(MaxFanSpeedMode::Disable),
+    }
 }
 
 pub fn set_fan_mode(device: &Device, mode: FanMode) -> Result<()> {

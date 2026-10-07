@@ -11,7 +11,7 @@ The supported devices are :
 
 ## What can it control?
 
-* Performance modes (including overclock & Hyperboost)
+* Performance modes (including Synapse overclock & Hyperboost)
 * Complete profiles for replacing Synapse (`profile max`, `profile balanced`, `profile silent`)
 * **Battery care (charge limiting)** - 50%, 55%, 60%, 65%, 70%, 75%, 80%, or disabled (100%)
 * Fan control (auto/manual with RPM settings)
@@ -33,24 +33,44 @@ keeping Synapse installed or running:
 `profile max` applies:
 
 * HyperBoost performance mode
-* CPU Undervolt
+* CPU High
 * GPU High
 * Manual fan control at 5100 RPM
 * Keyboard brightness 255
 * Lights always-on enabled
 
 `auto status` prints the EC state plus NVIDIA power limits, so the expected max
-state should include `Performance: Ok((Hyperboost, Manual))`, `CPU: Ok(Undervolt)`,
+state should include `Performance: Ok((Hyperboost, Manual))`, `CPU: Ok(High)`,
 `GPU: Ok(High)`, and `NVIDIA Current Power Limit : 175.00 W` on a supported
 Razer Blade 16 2023 RTX 4090 configuration.
+
+The captured EC CPU value `4` is exposed as `synapse-overclock`; do not treat it
+as an undervolt. The local capture table labels the same `0d07 ... 04` command
+as `custom mode, cpu overclock, gpu high`, so `profile max` keeps CPU on `High`
+by default while leaving the firmware preset available for explicit testing.
 
 To make `razer-ctl` own the laptop after reboot:
 
 ```powershell
-.\target\release\razer-cli.exe auto startup enable-max
 .\target\release\razer-cli.exe auto startup enable-tray
 .\target\release\razer-cli.exe auto startup status
 ```
+
+Do not enable the max-profile startup entry for the low-latency gaming setup;
+the tray should be the only login startup owner and should load the saved AC
+profile.
+
+For the low-latency gaming setup, the saved AC tray profile is:
+
+* Custom performance mode
+* CPU Boost
+* GPU High
+* Manual fan control at 5500 RPM
+
+Legacy scheduled tasks such as `RazerMax` should be removed. The helper scripts
+under `C:\Users\FSOS\Documents\Scripts` no longer register a recurring RazerMax
+task; `razer-max.ps1` is a manual gaming-profile script, not the HyperBoost max
+profile.
 
 ![](data/demo.gif)
 

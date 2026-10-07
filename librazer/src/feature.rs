@@ -70,4 +70,5 @@ feature_list![
     KbdBacklight,
     Fan,
     Perf,
+    LocalDimming,
 ];

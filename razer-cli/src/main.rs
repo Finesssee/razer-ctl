@@ -3,7 +3,7 @@ use librazer::device;
 use librazer::feature;
 use librazer::types::{
     BatteryCare, CpuBoost, FanMode, FanZone, GpuBoost, LightsAlwaysOn, LogoMode, MaxFanSpeedMode,
-    PerfMode,
+    PerfMode, Toggle,
 };
 
 use librazer::feature::Feature;
@@ -47,9 +47,11 @@ macro_rules! impl_unary_handle_cli {
 macro_rules! impl_unary_handle_with_arg_cli {
     (<$arg_type:ty>($matches:ident, $device:ident, $name:literal, $arg_name:literal, $arg2:literal, $setter:path)) => {
         match $matches.subcommand() {
-            Some(($name, matches)) => {
-                $setter($device, *matches.get_one::<$arg_type>($arg_name).unwrap(), $arg2)?
-            }
+            Some(($name, matches)) => $setter(
+                $device,
+                *matches.get_one::<$arg_type>($arg_name).unwrap(),
+                $arg2,
+            )?,
             _ => (),
         }
     };
@@ -84,6 +86,7 @@ macro_rules! impl_unary_cli {
 impl_unary_cli! {<feature::KbdBacklight><u8>("Set keyboard backlight brightness", "Number in range [0, 255]", command::set_keyboard_brightness, command::get_keyboard_brightness)}
 impl_unary_cli! {<feature::LidLogo><LogoMode>("Set lid logo mode", "", command::set_logo_mode, command::get_logo_mode)}
 impl_unary_cli! {<feature::LightsAlwaysOn><LightsAlwaysOn>("Set lights always on", "", command::set_lights_always_on, command::get_lights_always_on)}
+impl_unary_cli! {<feature::LocalDimming><Toggle>("Set display local dimming", "", command::set_local_dimming, command::get_local_dimming)}
 
 impl Cli for feature::BatteryCare {
     fn cmd(&self) -> Option<Command> {
@@ -101,42 +104,49 @@ impl Cli for feature::BatteryCare {
                 .subcommand(clap::Command::new("enable").about("Enable battery care (limit to 80%) [deprecated: use 'set 80']"))
                 .subcommand(clap::Command::new("disable").about("Disable battery care (charge to 100%) [deprecated: use 'set 100']"))
                 .subcommand(clap::Command::new("get").about("Get current battery care setting"))
+                .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(Toggle)}, "charge-full-once", "STATE", "Charge to 100% once, ignoring the limit", "Charge full once"})
                 .arg_required_else_help(true),
         )
     }
 
     fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
-            Some((ident, sub_matches)) if ident == self.name() => {
-                match sub_matches.subcommand() {
-                    Some(("set", set_matches)) => {
-                        let percent = *set_matches.get_one::<u8>("PERCENT").unwrap();
-                        let mode = BatteryCare::from_percent(percent)?;
-                        command::set_battery_care(device, mode)?;
-                        info!("Battery care set to {}% limit", mode.to_percent());
-                        Ok(())
-                    }
-                    Some(("enable", _)) => {
-                        command::set_battery_care(device, BatteryCare::Percent80)?;
-                        info!("Battery care enabled (charge limit set to 80%)");
-                        Ok(())
-                    }
-                    Some(("disable", _)) => {
-                        command::set_battery_care(device, BatteryCare::Disable)?;
-                        info!("Battery care disabled (will charge to 100%)");
-                        Ok(())
-                    }
-                    Some(("get", _)) => {
-                        let current = command::get_battery_care(device)?;
-                        info!("Current battery care: {}%", current.to_percent());
-                        Ok(())
-                    }
-                    _ => Ok(()),
+            Some((ident, sub_matches)) if ident == self.name() => match sub_matches.subcommand() {
+                Some(("set", set_matches)) => {
+                    let percent = *set_matches.get_one::<u8>("PERCENT").unwrap();
+                    let mode = BatteryCare::from_percent(percent)?;
+                    command::set_battery_care(device, mode)?;
+                    info!("Battery care set to {}% limit", mode.to_percent());
+                    Ok(())
                 }
-            }
+                Some(("enable", _)) => {
+                    command::set_battery_care(device, BatteryCare::Percent80)?;
+                    info!("Battery care enabled (charge limit set to 80%)");
+                    Ok(())
+                }
+                Some(("disable", _)) => {
+                    command::set_battery_care(device, BatteryCare::Disable)?;
+                    info!("Battery care disabled (will charge to 100%)");
+                    Ok(())
+                }
+                Some(("get", _)) => {
+                    let current = command::get_battery_care(device)?;
+                    info!("Current battery care: {}%", current.to_percent());
+                    Ok(())
+                }
+                Some(("charge-full-once", matches)) => command::set_charge_full_once(
+                    device,
+                    *matches.get_one::<Toggle>("STATE").unwrap(),
+                ),
+                _ => Ok(()),
+            },
             Some(("info", _)) => {
                 let current = command::get_battery_care(device)?;
                 info!("{}: {}%", self.name(), current.to_percent());
+                println!(
+                    "charge-full-once: {:?}",
+                    command::get_charge_full_once(device)
+                );
                 Ok(())
             }
             _ => Ok(()),
@@ -184,6 +194,38 @@ impl Cli for CustomCommand {
     }
 }
 
+fn force_arg() -> clap::Arg {
+    arg!(--force "Apply even when the charger is weaker than recommended")
+}
+
+fn apply_max_profile(device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
+    if !matches.get_flag("force") {
+        command::check_adapter_for_max_profile(device)?;
+    }
+    command::set_max_performance_profile(device)
+}
+
+/// Two EC sensors are CPU then GPU on the Blade 16 (2023); other layouts are listed by index.
+fn format_temperatures(temps: &[u8]) -> String {
+    match temps {
+        [cpu, gpu] => format!("CPU {} °C, GPU {} °C", cpu, gpu),
+        _ => temps
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!("sensor {} {} °C", i + 1, t))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+fn format_watts(watts: Option<u16>) -> String {
+    match watts {
+        Some(0) => "none".to_string(),
+        Some(w) => format!("{} W", w),
+        None => "unknown".to_string(),
+    }
+}
+
 struct ProfileCommand;
 
 impl Feature for ProfileCommand {
@@ -197,7 +239,7 @@ impl Cli for ProfileCommand {
         Some(
             clap::Command::new(self.name())
                 .about("Apply complete laptop profiles")
-                .subcommand(clap::Command::new("max").about("Synapse-derived max: HyperBoost, CPU Undervolt, GPU High, manual 5100 RPM fan, max keyboard brightness"))
+                .subcommand(clap::Command::new("max").about("Synapse-derived max: HyperBoost, CPU High, GPU High, manual 5100 RPM fan, max keyboard brightness").arg(force_arg()))
                 .subcommand(clap::Command::new("balanced").about("Balanced performance with EC-managed fans and max keyboard brightness"))
                 .subcommand(clap::Command::new("silent").about("Silent performance with EC-managed fans and max keyboard brightness"))
                 .arg_required_else_help(true),
@@ -207,7 +249,7 @@ impl Cli for ProfileCommand {
     fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, matches)) if ident == self.name() => match matches.subcommand() {
-                Some(("max", _)) => command::set_max_performance_profile(device),
+                Some(("max", matches)) => apply_max_profile(device, matches),
                 Some(("balanced", _)) => command::set_balanced_profile(device),
                 Some(("silent", _)) => command::set_silent_profile(device),
                 _ => Ok(()),
@@ -235,8 +277,14 @@ impl Cli for StatusCommand {
             Some((ident, _)) if ident == self.name() => {
                 println!("Device: {:?}", device.info);
                 println!("lid-logo: {:?}", command::get_logo_mode(device));
-                println!("lights-always-on: {:?}", command::get_lights_always_on(device));
-                println!("kbd-backlight: {:?}", command::get_keyboard_brightness(device));
+                println!(
+                    "lights-always-on: {:?}",
+                    command::get_lights_always_on(device)
+                );
+                println!(
+                    "kbd-backlight: {:?}",
+                    command::get_keyboard_brightness(device)
+                );
 
                 match command::get_perf_mode(device) {
                     Ok((perf_mode, fan_mode)) => {
@@ -247,7 +295,9 @@ impl Cli for StatusCommand {
                         }
 
                         match fan_mode {
-                            FanMode::Auto => println!("Fan: Auto"),
+                            FanMode::Auto | FanMode::ForceAuto => {
+                                println!("Fan: {:?}", fan_mode)
+                            }
                             FanMode::Manual => println!(
                                 "Fan set to: Manual@{:?} RPM",
                                 command::get_fan_rpm(device, FanZone::Zone1)
@@ -261,6 +311,24 @@ impl Cli for StatusCommand {
                     "Fan actual: {:?} RPM",
                     command::get_fan_actual_rpm(device, FanZone::Zone1)
                 );
+
+                match command::get_temperatures(device) {
+                    Ok(temps) => println!("Temperatures: {}", format_temperatures(&temps)),
+                    Err(e) => println!("Temperatures: Err({})", e),
+                }
+                match command::get_adapter_wattage(device) {
+                    Ok(adapter) => println!(
+                        "Charger: {} (recommended {}){}",
+                        format_watts(adapter.connected),
+                        format_watts(adapter.recommended),
+                        if adapter.is_undersized() {
+                            ", undersized: max profile is blocked"
+                        } else {
+                            ""
+                        }
+                    ),
+                    Err(e) => println!("Charger: Err({})", e),
+                }
 
                 print_nvidia_power_limits();
                 print_razer_conflicts();
@@ -284,9 +352,15 @@ impl Cli for StartupCommand {
         Some(
             clap::Command::new(self.name())
                 .about("Manage Windows login startup entries")
-                .subcommand(clap::Command::new("enable-max").about("Apply max profile at Windows login"))
-                .subcommand(clap::Command::new("disable-max").about("Remove max-profile startup entry"))
-                .subcommand(clap::Command::new("enable-tray").about("Launch razer-tray at Windows login"))
+                .subcommand(
+                    clap::Command::new("enable-max").about("Apply max profile at Windows login"),
+                )
+                .subcommand(
+                    clap::Command::new("disable-max").about("Remove max-profile startup entry"),
+                )
+                .subcommand(
+                    clap::Command::new("enable-tray").about("Launch razer-tray at Windows login"),
+                )
                 .subcommand(clap::Command::new("disable-tray").about("Remove tray startup entry"))
                 .subcommand(clap::Command::new("status").about("Show configured startup entries"))
                 .arg_required_else_help(true),
@@ -298,12 +372,12 @@ impl Cli for StartupCommand {
             Some((ident, matches)) if ident == self.name() => match matches.subcommand() {
                 Some(("enable-max", _)) => set_startup_entry(
                     STARTUP_MAX_VALUE,
-                    &format!("\"{}\" auto profile max", current_cli_path()?.display()),
+                    &startup_max_command(&current_cli_path()?),
                 ),
                 Some(("disable-max", _)) => remove_startup_entry(STARTUP_MAX_VALUE),
                 Some(("enable-tray", _)) => set_startup_entry(
                     STARTUP_TRAY_VALUE,
-                    &format!("\"{}\" --profile=max", current_tray_path()?.display()),
+                    &startup_tray_command(&current_tray_path()?),
                 ),
                 Some(("disable-tray", _)) => remove_startup_entry(STARTUP_TRAY_VALUE),
                 Some(("status", _)) => print_startup_status(),
@@ -341,7 +415,9 @@ impl Cli for feature::Fan {
             }
             Some(("info", _)) => {
                 match command::get_perf_mode(device) {
-                    Ok((_, fan_mode @ FanMode::Auto)) => {println!("Fan: {:?}", fan_mode)},
+                    Ok((_, fan_mode @ (FanMode::Auto | FanMode::ForceAuto))) => {
+                        println!("Fan: {:?}", fan_mode)
+                    }
                     Ok((_, fan_mode @ FanMode::Manual)) => {
                         println!(
                             "Fan set to: {:?}@{:?} RPM",
@@ -367,7 +443,7 @@ impl Cli for feature::Perf {
         Some(
             clap::Command::new(self.name())
                 .about("Control performance modes")
-                .subcommand(clap::Command::new("max").about("Apply max performance profile: HyperBoost, CPU Undervolt, GPU High, manual 5100 RPM fan"))
+                .subcommand(clap::Command::new("max").about("Apply max performance profile: HyperBoost, CPU High, GPU High, manual 5100 RPM fan").arg(force_arg()))
                 .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(PerfMode)}, "mode", "MODE", "Set performance mode", "Performance mode"})
                 .subcommand(impl_unary_cmd_cli!{{clap::value_parser!(CpuBoost)}, "cpu", "CPU", "Set CPU boost", "CPU boost"})
                 .subcommand( impl_unary_cmd_cli!{{clap::value_parser!(GpuBoost)}, "gpu", "GPU", "Set GPU boost", "GPU boost"})
@@ -379,7 +455,7 @@ impl Cli for feature::Perf {
         match matches.subcommand() {
             Some((ident, matches)) if ident == self.name() => {
                 match matches.subcommand() {
-                    Some(("max", _)) => command::set_max_performance_profile(device)?,
+                    Some(("max", matches)) => apply_max_profile(device, matches)?,
                     _ => (),
                 }
                 impl_unary_handle_cli! {<PerfMode>(matches, device, "mode", "MODE", command::set_perf_mode)}
@@ -397,7 +473,10 @@ impl Cli for feature::Perf {
                     println!("GPU: {:?}", gpu_boost);
 
                     if matches!(perf_mode, Ok((PerfMode::Custom, _)))
-                        && matches!(cpu_boost, Ok(CpuBoost::Boost) | Ok(CpuBoost::Undervolt))
+                        && matches!(
+                            cpu_boost,
+                            Ok(CpuBoost::Boost) | Ok(CpuBoost::SynapseOverclock)
+                        )
                         && matches!(gpu_boost, Ok(GpuBoost::High))
                     {
                         println!(
@@ -411,7 +490,7 @@ impl Cli for feature::Perf {
                     device,
                     0x0d88,
                     &[0, 1, 0]);
-                    println!("Rssponse: {:?}",response); 
+                    println!("Rssponse: {:?}",response);
                 */
                 Ok(())
             }
@@ -543,6 +622,14 @@ fn current_tray_path() -> Result<std::path::PathBuf> {
     Ok(cli_path.with_file_name("razer-tray.exe"))
 }
 
+fn startup_max_command(path: &std::path::Path) -> String {
+    format!("\"{}\" auto profile max", path.display())
+}
+
+fn startup_tray_command(path: &std::path::Path) -> String {
+    format!("\"{}\"", path.display())
+}
+
 #[cfg(windows)]
 fn startup_run_key() -> Result<winreg::RegKey> {
     use winreg::enums::HKEY_CURRENT_USER;
@@ -586,12 +673,26 @@ fn remove_startup_entry(_name: &str) -> Result<()> {
 #[cfg(windows)]
 fn print_startup_status() -> Result<()> {
     let key = startup_run_key()?;
+    let mut max_enabled = false;
+    let mut tray_enabled = false;
     for name in [STARTUP_MAX_VALUE, STARTUP_TRAY_VALUE] {
         match key.get_value::<String, _>(name) {
-            Ok(command) => println!("{} = {}", name, command),
+            Ok(command) => {
+                println!("{} = {}", name, command);
+                if name == STARTUP_MAX_VALUE {
+                    max_enabled = true;
+                } else if name == STARTUP_TRAY_VALUE {
+                    tray_enabled = true;
+                }
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("{} = <not set>", name),
             Err(e) => return Err(e.into()),
         }
+    }
+    if max_enabled && tray_enabled {
+        println!(
+            "WARNING: both max-profile startup and tray startup are enabled; this can cause profile races."
+        );
     }
     Ok(())
 }
@@ -606,6 +707,37 @@ fn update_cmd(cmd: Command, features: &[Box<dyn Cli>]) -> Command {
         .iter()
         .filter_map(|f| f.cmd())
         .fold(cmd, |cmd, f| cmd.subcommand(f))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_startup_command_does_not_force_max_profile() {
+        let command = startup_tray_command(std::path::Path::new(
+            r"D:\code\razer-ctl\target\release\razer-tray.exe",
+        ));
+
+        assert_eq!(
+            command,
+            r#""D:\code\razer-ctl\target\release\razer-tray.exe""#
+        );
+        assert!(!command.contains("--profile=max"));
+        assert!(!command.contains("--max"));
+    }
+
+    #[test]
+    fn max_startup_command_is_explicitly_separate_from_tray_startup() {
+        let command = startup_max_command(std::path::Path::new(
+            r"D:\code\razer-ctl\target\release\razer-cli.exe",
+        ));
+
+        assert_eq!(
+            command,
+            r#""D:\code\razer-ctl\target\release\razer-cli.exe" auto profile max"#
+        );
+    }
 }
 
 fn handle(
@@ -633,7 +765,7 @@ fn gen_cli_features(feature_list: &[&str]) -> Vec<Box<dyn Cli>> {
 
 fn main() -> Result<()> {
     env_logger::init();
-    
+
     let info_cmd = clap::Command::new("info").about("Get device info");
     let auto_cmd = clap::Command::new("auto")
         .about("Automatically detect supported Razer device and enable device specific features")
@@ -693,7 +825,7 @@ fn main() -> Result<()> {
                 name: "Unknown",
                 pid: *submatches.get_one::<u16>("pid").unwrap(),
                 features: feature::ALL_FEATURES,
-                init_cmds : &[]
+                init_cmds: &[],
             })?;
             handle(&device, submatches, &cli_features)?;
         }

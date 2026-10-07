@@ -1,16 +1,20 @@
 #![windows_subsystem = "windows"]
 
+use anyhow::Error;
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
-use anyhow::Error;
 
-use librazer::types::{BatteryCare, CpuBoost, GpuBoost, LightsAlwaysOn, LogoMode, FanMode};
+use librazer::types::{
+    AdapterWattage, BatteryCare, CpuBoost, FanMode, GpuBoost, LightsAlwaysOn, LogoMode,
+};
 use librazer::{command, device};
 
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::{
-    menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, PredefinedMenuItem, MenuItem, Submenu, MenuId},
-    TrayIconBuilder, TrayIconEvent, 
+    menu::{
+        CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+    },
+    TrayIconBuilder, TrayIconEvent,
 };
 
 use std::process::Command as procCommand;
@@ -21,13 +25,13 @@ use single_instance::SingleInstance;
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::HANDLE;
 #[cfg(target_os = "windows")]
+use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
     GetCurrentProcess, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
     IDLE_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
     PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
 };
-#[cfg(target_os = "windows")]
-use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
@@ -35,6 +39,113 @@ const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 enum FanSpeed {
     Auto,
     Manual(u16),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_ac_profile_is_low_latency_gaming_profile() {
+        let config = ConfigState::default();
+
+        assert_eq!(
+            config.ac_state.perf_mode,
+            PerfMode::Custom(CpuBoost::Boost, GpuBoost::High)
+        );
+        assert_eq!(config.ac_state.fan_speed, FanSpeed::Manual(5500));
+        assert_eq!(
+            config.ac_state.lights_mode.always_on,
+            LightsAlwaysOn::Disable
+        );
+    }
+
+    #[test]
+    fn repairs_battery_mode_saved_as_ac_profile_on_ac_power() {
+        let mut config = ConfigState {
+            ac_state: DeviceState {
+                perf_mode: PerfMode::Battery,
+                fan_speed: FanSpeed::Auto,
+                ..DeviceState::default()
+            },
+            battery_state: DeviceState {
+                perf_mode: PerfMode::Battery,
+                fan_speed: FanSpeed::Auto,
+                ..DeviceState::default()
+            },
+        };
+
+        config.repair_for_startup(true, false);
+
+        assert_eq!(
+            config.ac_state.perf_mode,
+            PerfMode::Custom(CpuBoost::Boost, GpuBoost::High)
+        );
+        assert_eq!(config.ac_state.fan_speed, FanSpeed::Manual(5500));
+        assert_eq!(config.battery_state.perf_mode, PerfMode::Battery);
+    }
+
+    #[test]
+    fn does_not_repair_battery_mode_when_machine_is_on_battery() {
+        let mut config = ConfigState {
+            ac_state: DeviceState {
+                perf_mode: PerfMode::Battery,
+                ..DeviceState::default()
+            },
+            battery_state: DeviceState::default(),
+        };
+
+        config.repair_for_startup(false, false);
+
+        assert_eq!(config.ac_state.perf_mode, PerfMode::Battery);
+    }
+
+    #[test]
+    fn forced_max_startup_still_requires_explicit_flag() {
+        let mut config = ConfigState::default();
+
+        config.repair_for_startup(true, true);
+
+        assert_eq!(config.ac_state.perf_mode, PerfMode::Max);
+        assert_eq!(config.ac_state.fan_speed, FanSpeed::Manual(5100));
+    }
+
+    #[test]
+    fn serializes_custom_ac_profile_without_using_battery_profile() {
+        let config = ConfigState::default();
+
+        let serialized = toml::to_string(&config).expect("config should serialize");
+
+        assert!(serialized.contains("[ac_state.perf_mode]"));
+        assert!(serialized.contains("Custom = ["));
+        assert!(serialized.contains("\"Boost\""));
+        assert!(serialized.contains("\"High\""));
+        assert!(serialized.contains("Manual = 5500"));
+    }
+
+    #[test]
+    fn tooltip_drops_trailing_lines_to_fit_windows_limit() {
+        let long = (1..=20)
+            .map(|i| format!("line {i:02} padding"))
+            .collect::<Vec<_>>()
+            .join(&String::from(char::from(10)));
+        let fitted = fit_tooltip(&long);
+        assert!(fitted.encode_utf16().count() <= TOOLTIP_MAX_UNITS);
+        assert!(fitted.starts_with("line 01"));
+        assert!(long.starts_with(&fitted));
+        assert_eq!(fit_tooltip("short"), "short");
+    }
+
+    #[test]
+    fn detects_lights_only_external_change() {
+        let mut active = DeviceState::default();
+        active.lights_mode.keyboard_brightness = 128;
+
+        assert!(DeviceState::default().differs_only_lights(&active));
+
+        active.fan_speed = FanSpeed::Manual(5500);
+        assert!(!DeviceState::default().differs_only_lights(&active));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -66,16 +177,37 @@ struct DeviceState {
     perf_mode: PerfMode,
     lights_mode: LightsMode,
     battery_care: BatteryCare,
-    fan_speed : FanSpeed,
+    fan_speed: FanSpeed,
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
 impl DeviceState {
+    fn differs_only_lights(&self, other: &Self) -> bool {
+        self.lights_mode != other.lights_mode
+            && self.perf_mode == other.perf_mode
+            && self.battery_care == other.battery_care
+            && self.fan_speed == other.fan_speed
+    }
+
+    // The EC sometimes returns a transient bad read (battery care 0x0, or the two perf zones
+    // disagreeing mid-switch). Retry the read once before treating it as a device error, so a
+    // single bad read no longer triggers a full re-init and state reapply. Reads only; no writes.
+    fn read_with_retry(device: &device::Device) -> Result<Self> {
+        match Self::read(device) {
+            Ok(state) => Ok(state),
+            Err(e) => {
+                log::warn!("device read failed, retrying once: {:?}", e);
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                Self::read(device)
+            }
+        }
+    }
+
     fn read(device: &device::Device) -> Result<Self> {
         let (raw_perf_mode, fan_mode) = command::get_perf_mode(device)?;
         let fan_speed = match fan_mode {
-            FanMode::Auto => FanSpeed::Auto,
+            FanMode::Auto | FanMode::ForceAuto => FanSpeed::Auto,
             FanMode::Manual => {
                 let rpm = command::get_fan_rpm(device, librazer::types::FanZone::Zone1)?;
                 FanSpeed::Manual(rpm)
@@ -90,7 +222,7 @@ impl DeviceState {
             librazer::types::PerfMode::Hyperboost => {
                 let cpu_boost = command::get_cpu_boost(device)?;
                 let gpu_boost = command::get_gpu_boost(device)?;
-                if cpu_boost == CpuBoost::Undervolt
+                if cpu_boost == CpuBoost::High
                     && gpu_boost == GpuBoost::High
                     && fan_speed == FanSpeed::Manual(5100)
                 {
@@ -104,6 +236,10 @@ impl DeviceState {
                 let gpu_boost = command::get_gpu_boost(device)?;
                 PerfMode::Custom(cpu_boost, gpu_boost)
             }
+            mode @ (librazer::types::PerfMode::Gaming
+            | librazer::types::PerfMode::BatterySaver) => {
+                anyhow::bail!("Device is in {:?} mode, which razer-tray doesn't manage", mode)
+            }
         };
 
         let lights_mode = LightsMode {
@@ -115,10 +251,10 @@ impl DeviceState {
         let battery_care = command::get_battery_care(device)?;
 
         Ok(Self {
-            perf_mode,            
+            perf_mode,
             lights_mode,
             battery_care,
-            fan_speed
+            fan_speed,
         })
     }
 
@@ -127,9 +263,15 @@ impl DeviceState {
             PerfMode::Max => command::set_max_performance_profile(device),
             PerfMode::Battery => command::set_perf_mode(device, librazer::types::PerfMode::Battery),
             PerfMode::Silent => command::set_perf_mode(device, librazer::types::PerfMode::Silent),
-            PerfMode::Balanced => command::set_perf_mode(device, librazer::types::PerfMode::Balanced),
-            PerfMode::Performance => command::set_perf_mode(device, librazer::types::PerfMode::Performance),
-            PerfMode::Hyperboost => command::set_perf_mode(device, librazer::types::PerfMode::Hyperboost),
+            PerfMode::Balanced => {
+                command::set_perf_mode(device, librazer::types::PerfMode::Balanced)
+            }
+            PerfMode::Performance => {
+                command::set_perf_mode(device, librazer::types::PerfMode::Performance)
+            }
+            PerfMode::Hyperboost => {
+                command::set_perf_mode(device, librazer::types::PerfMode::Hyperboost)
+            }
             PerfMode::Custom(cpu_boost, gpu_boost) => {
                 command::set_perf_mode(device, librazer::types::PerfMode::Custom)?;
                 command::set_cpu_boost(device, cpu_boost)?;
@@ -156,21 +298,14 @@ impl DeviceState {
         command::set_battery_care(device, self.battery_care)
     }
 
-    fn perf_delta(
-        &self,
-        cpu_boost: Option<CpuBoost>,
-        gpu_boost: Option<GpuBoost>,
-    ) -> Self {
+    fn perf_delta(&self, cpu_boost: Option<CpuBoost>, gpu_boost: Option<GpuBoost>) -> Self {
         DeviceState {
             perf_mode: if let PerfMode::Custom(cb, gb) = self.perf_mode {
-                PerfMode::Custom(
-                    cpu_boost.unwrap_or(cb),
-                    gpu_boost.unwrap_or(gb)
-                )
+                PerfMode::Custom(cpu_boost.unwrap_or(cb), gpu_boost.unwrap_or(gb))
             } else {
                 PerfMode::Custom(
-                    cpu_boost.unwrap_or(CpuBoost::Undervolt),
-                    gpu_boost.unwrap_or(GpuBoost::High)
+                    cpu_boost.unwrap_or(CpuBoost::High),
+                    gpu_boost.unwrap_or(GpuBoost::High),
                 )
             },
             ..*self
@@ -183,7 +318,20 @@ impl DeviceState {
             fan_speed: FanSpeed::Manual(5100),
             lights_mode: LightsMode {
                 keyboard_brightness: 255,
-                always_on: LightsAlwaysOn::Enable,
+                always_on: LightsAlwaysOn::Disable,
+                ..self.lights_mode
+            },
+            ..*self
+        }
+    }
+
+    fn gaming_profile(&self) -> Self {
+        Self {
+            perf_mode: PerfMode::Custom(CpuBoost::Boost, GpuBoost::High),
+            fan_speed: FanSpeed::Manual(5500),
+            lights_mode: LightsMode {
+                keyboard_brightness: 255,
+                always_on: LightsAlwaysOn::Disable,
                 ..self.lights_mode
             },
             ..*self
@@ -225,7 +373,7 @@ impl Default for DeviceState {
                 always_on: LightsAlwaysOn::Disable,
             },
             battery_care: BatteryCare::Percent80,
-            fan_speed : FanSpeed::Auto,
+            fan_speed: FanSpeed::Auto,
         }
     }
 }
@@ -252,27 +400,53 @@ struct ConfigState {
     battery_state: DeviceState,
 }
 
-impl Default for ConfigState {
-    fn default() -> Self {
-        Self {
-            ac_state: DeviceState {
-                perf_mode: PerfMode::Max,
-                fan_speed: FanSpeed::Manual(5100),
-                lights_mode: LightsMode {
-                    logo_mode: LogoMode::Off,
-                    keyboard_brightness: 255,
-                    always_on: LightsAlwaysOn::Enable,
-                },
-                ..Default::default()
-            },
-            battery_state : DeviceState {
-                    perf_mode : PerfMode::Battery,
-                    ..Default::default()
-                },
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileBucket {
+    Ac,
+    Battery,
+}
+
+impl ProfileBucket {
+    fn from_ac_power(ac_power: bool) -> Self {
+        if ac_power {
+            Self::Ac
+        } else {
+            Self::Battery
         }
     }
 }
 
+impl Default for ConfigState {
+    fn default() -> Self {
+        Self {
+            ac_state: DeviceState::default().gaming_profile(),
+            battery_state: DeviceState {
+                perf_mode: PerfMode::Battery,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+impl ConfigState {
+    fn repair_for_startup(&mut self, ac_power: bool, force_ac_max_profile: bool) {
+        if !ac_power {
+            return;
+        }
+
+        if force_ac_max_profile {
+            self.ac_state = self.ac_state.max_profile();
+        } else if matches!(self.ac_state.perf_mode, PerfMode::Battery) {
+            log::warn!("AC profile was Battery; repairing to gaming profile");
+            self.ac_state = self.ac_state.gaming_profile();
+        }
+
+        if self.ac_state.lights_mode.always_on == LightsAlwaysOn::Enable {
+            log::warn!("AC profile had lights-always-on enabled; disabling to preserve Fn keys");
+            self.ac_state.lights_mode.always_on = LightsAlwaysOn::Disable;
+        }
+    }
+}
 
 struct ProgramState {
     device_state: DeviceState,
@@ -280,12 +454,41 @@ struct ProgramState {
     battery_state: DeviceState,
     event_handlers: std::collections::HashMap<String, DeviceState>,
     menu: Menu,
-    fan_actual : FanRpm,
-    ac_power : bool
+    fan_actual: FanRpm,
+    ec_readings: EcReadings,
+    ac_power: bool,
+}
+
+/// Sensor readings shown in the tooltip. Empty when the EC doesn't support them.
+#[derive(Default)]
+struct EcReadings {
+    temperatures: Vec<u8>,
+    adapter: Option<AdapterWattage>,
+}
+
+impl EcReadings {
+    fn read(device: &device::Device) -> Self {
+        Self {
+            temperatures: command::get_temperatures(device).unwrap_or_default(),
+            adapter: command::get_adapter_wattage(device).ok(),
+        }
+    }
+}
+
+// Windows keeps 128 UTF-16 units of a tray tooltip, including the terminating null.
+const TOOLTIP_MAX_UNITS: usize = 127;
+
+/// Drops whole lines from the end until the tooltip fits.
+fn fit_tooltip(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    while lines.join("\n").encode_utf16().count() > TOOLTIP_MAX_UNITS && lines.len() > 1 {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 impl ProgramState {
-    fn new(device_state: DeviceState, fan_last : FanRpm) -> Result<Self> {
+    fn new(device_state: DeviceState, fan_last: FanRpm) -> Result<Self> {
         let (menu, event_handlers) = Self::create_menu_and_handlers(&device_state)?;
         let fan_actual = fan_last.clone();
         let ac_power = true;
@@ -298,7 +501,8 @@ impl ProgramState {
             event_handlers,
             menu,
             fan_actual,
-            ac_power
+            ec_readings: EcReadings::default(),
+            ac_power,
         })
     }
 
@@ -312,7 +516,11 @@ impl ProgramState {
         // complete profiles
         let profiles = Submenu::new("Profiles", true);
         let profile_items = [
-            ("profile:max", "Max (Synapse replacement)", dstate.max_profile()),
+            (
+                "profile:max",
+                "Max (Synapse replacement)",
+                dstate.max_profile(),
+            ),
             ("profile:balanced", "Balanced", dstate.balanced_profile()),
             ("profile:silent", "Silent", dstate.silent_profile()),
         ];
@@ -576,7 +784,7 @@ impl ProgramState {
 
         // battery care submenu
         menu.append(&PredefinedMenuItem::separator())?;
-        
+
         let battery_care_options = [
             (BatteryCare::Percent50, "50%", "battery_care_50"),
             (BatteryCare::Percent55, "55%", "battery_care_55"),
@@ -585,9 +793,13 @@ impl ProgramState {
             (BatteryCare::Percent70, "70%", "battery_care_70"),
             (BatteryCare::Percent75, "75%", "battery_care_75"),
             (BatteryCare::Percent80, "80%", "battery_care_80"),
-            (BatteryCare::Disable, "Disabled (100%)", "battery_care_disable"),
+            (
+                BatteryCare::Disable,
+                "Disabled (100%)",
+                "battery_care_disable",
+            ),
         ];
-        
+
         let battery_care_items: Vec<CheckMenuItem> = battery_care_options
             .iter()
             .map(|(mode, label, id)| {
@@ -598,16 +810,10 @@ impl ProgramState {
                         ..*dstate
                     },
                 );
-                CheckMenuItem::with_id(
-                    id,
-                    label,
-                    true,
-                    dstate.battery_care == *mode,
-                    None,
-                )
+                CheckMenuItem::with_id(id, label, true, dstate.battery_care == *mode, None)
             })
             .collect();
-        
+
         menu.append(&Submenu::with_items(
             "Battery Care",
             true,
@@ -619,7 +825,12 @@ impl ProgramState {
 
         // gpu task killer
         menu.append(&PredefinedMenuItem::separator())?;
-        let terminate_item = MenuItem::with_id("dgpu_terminate_proc","Terminate dGPU processes", true, None);
+        let terminate_item = MenuItem::with_id(
+            "dgpu_terminate_proc",
+            "Terminate dGPU processes",
+            true,
+            None,
+        );
         menu.append(&terminate_item)?;
         // footer
         menu.append(&PredefinedMenuItem::separator())?;
@@ -665,9 +876,7 @@ impl ProgramState {
                 PerfMode::Silent => PerfMode::Balanced,
                 PerfMode::Balanced => PerfMode::Performance,
                 PerfMode::Performance => PerfMode::Hyperboost,
-                PerfMode::Hyperboost => {
-                PerfMode::Custom(CpuBoost::Undervolt, GpuBoost::High)
-                }
+                PerfMode::Hyperboost => PerfMode::Custom(CpuBoost::High, GpuBoost::High),
                 PerfMode::Custom(..) => PerfMode::Battery,
             },
             ..self.device_state
@@ -692,16 +901,29 @@ impl ProgramState {
                 writeln!(&mut info, "GPU: {:?}", gpu_boost)?;
             }
         }
+        match self.ec_readings.temperatures.as_slice() {
+            [] => {}
+            // Sensor 1 is the CPU and sensor 2 the GPU on the Blade 16 (2023).
+            [cpu, gpu] => writeln!(&mut info, "CPU {}°C  GPU {}°C", cpu, gpu)?,
+            temps => writeln!(&mut info, "Temps {:?} °C", temps)?,
+        }
+        if let Some(adapter) = self.ec_readings.adapter.filter(|a| a.is_undersized()) {
+            writeln!(
+                &mut info,
+                "Charger {} W, needs {} W",
+                adapter.connected.unwrap_or(0),
+                adapter.recommended.unwrap_or(0)
+            )?;
+        }
         match self.device_state.fan_speed {
             FanSpeed::Auto => writeln!(&mut info, "Fan Auto")?,
-            FanSpeed::Manual(rpm) => writeln!(&mut info, "Fan {:?} RPM", rpm)?
+            FanSpeed::Manual(rpm) => writeln!(&mut info, "Fan {:?} RPM", rpm)?,
         }
-        
+
         writeln!(
             &mut info,
             "Fan actual : {:?}, {:?} PRM",
-            self.fan_actual.fan1,
-            self.fan_actual.fan2,
+            self.fan_actual.fan1, self.fan_actual.fan2,
         )?;
 
         writeln!(
@@ -724,7 +946,7 @@ impl ProgramState {
 
         // Battery care with percentage
         match self.device_state.battery_care {
-            BatteryCare::Disable => {}, // No indicator for disabled
+            BatteryCare::Disable => {} // No indicator for disabled
             _ => {
                 writeln!(
                     &mut info,
@@ -734,7 +956,7 @@ impl ProgramState {
             }
         }
 
-        Ok((info.to_string() + &status).trim_end().to_string())
+        Ok(fit_tooltip((info.to_string() + &status).trim_end()))
     }
 
     fn icon(&self) -> tray_icon::Icon {
@@ -768,18 +990,34 @@ impl ProgramState {
         &mut self,
         tray_icon: &mut tray_icon::TrayIcon,
         new_device_state: DeviceState,
-        device: &device::Device
+        device: &device::Device,
+        bucket: ProfileBucket,
     ) -> Result<()> {
         self.device_state = new_device_state.clone();
         self.device_state.apply(device)?;
         (self.menu, self.event_handlers) = Self::create_menu_and_handlers(&self.device_state)?;
         self.fan_actual = get_fan_rpm(device)?;
-        if self.ac_power {
-            self.ac_state = self.device_state.clone()
-        } else {
-            self.battery_state = self.device_state.clone()
+        self.ec_readings = EcReadings::read(device);
+        if self.device_state.perf_mode == PerfMode::Max
+            && self.ec_readings.adapter.is_some_and(|a| a.is_undersized())
+        {
+            log::warn!(
+                "max profile applied with an undersized charger: {:?}",
+                self.ec_readings.adapter
+            );
         }
-        confy::store(PKG_NAME, None, &ConfigState {ac_state : self.ac_state,battery_state :  self.battery_state})?;
+        match bucket {
+            ProfileBucket::Ac => self.ac_state = self.device_state.clone(),
+            ProfileBucket::Battery => self.battery_state = self.device_state.clone(),
+        }
+        confy::store(
+            PKG_NAME,
+            None,
+            &ConfigState {
+                ac_state: self.ac_state,
+                battery_state: self.battery_state,
+            },
+        )?;
         tray_icon.set_icon(Some(self.icon()))?;
         tray_icon.set_tooltip(Some(self.tooltip()?))?;
         tray_icon.set_menu(Some(Box::new(self.menu.clone())));
@@ -787,23 +1025,18 @@ impl ProgramState {
         log::info!("state updated to {:?}", new_device_state);
         Ok(())
     }
-
 }
-
-
 
 #[cfg(target_os = "windows")]
 fn get_power_state() -> Result<bool> {
-    let mut ac_power : bool = true;
+    let mut ac_power: bool = true;
     unsafe {
         let mut status = SYSTEM_POWER_STATUS::default();
         match GetSystemPowerStatus(&mut status) {
-            Ok(()) => {
-                match status.ACLineStatus {
-                    0 => ac_power = false,
-                    _ => ac_power = true
-                }
-            }
+            Ok(()) => match status.ACLineStatus {
+                0 => ac_power = false,
+                _ => ac_power = true,
+            },
             Err(e) => {
                 eprintln!("Failed to get power status: {:?}", e);
             }
@@ -821,7 +1054,7 @@ fn get_power_state() -> Result<bool> {
     {
         return Ok(online.trim() == "1");
     }
-    
+
     // Fallback: check battery status
     if let Ok(status) = std::fs::read_to_string("/sys/class/power_supply/BAT0/status")
         .or_else(|_| std::fs::read_to_string("/sys/class/power_supply/BAT1/status"))
@@ -829,7 +1062,7 @@ fn get_power_state() -> Result<bool> {
         let status = status.trim();
         return Ok(status == "Charging" || status == "Full" || status == "Not charging");
     }
-    
+
     // Default to AC power if we can't detect
     log::warn!("Could not detect power state, assuming AC power");
     Ok(true)
@@ -837,8 +1070,8 @@ fn get_power_state() -> Result<bool> {
 
 fn get_fan_rpm(device: &device::Device) -> Result<FanRpm> {
     let fan_actual = FanRpm {
-        fan1 : command::get_fan_actual_rpm(device, librazer::types::FanZone::Zone1)?,
-        fan2 : command::get_fan_actual_rpm(device, librazer::types::FanZone::Zone2)?,
+        fan1: command::get_fan_actual_rpm(device, librazer::types::FanZone::Zone1)?,
+        fan2: command::get_fan_actual_rpm(device, librazer::types::FanZone::Zone2)?,
     };
     //log::info!("fans updated to {:?}", fan_actual);
     Ok(fan_actual)
@@ -915,41 +1148,40 @@ fn gpu_taskkill() -> Result<()> {
     let output = procCommand::new("nvidia-smi")
         .args(&["--query-compute-apps=name,pid", "--format=csv,noheader"])
         .output();
-    
+
     if output.is_err() {
         log::info!("nvidia-smi not found or no GPU processes");
         return Ok(());
     }
-    
+
     let output = output?;
     if !output.status.success() {
         return Ok(());
     }
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut system = System::new_all();
     system.refresh_all();
-    
+
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
         if parts.len() != 2 {
             continue;
         }
-        
+
         let pid: usize = match parts[1].parse() {
             Ok(p) => p,
             Err(_) => continue,
         };
-        
+
         if let Some(process) = system.process(sysinfo::Pid::from(pid)) {
             log::info!("Terminating GPU process: {} (PID: {})", parts[0], pid);
             process.kill_with(Signal::Term);
         }
     }
-    
+
     Ok(())
 }
-
 
 fn get_logging_file_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{}.log", PKG_NAME))
@@ -994,13 +1226,7 @@ fn init(
     let mut config: ConfigState = confy::load(PKG_NAME, None).unwrap_or_default();
     let fan_actual = get_fan_rpm(device)?;
     let ac_power = get_power_state()?;
-    let active_device_state = DeviceState::read(device)?;
-
-    if ac_power && force_ac_max_profile {
-        config.ac_state = config.ac_state.max_profile();
-    } else if ac_power && active_device_state.perf_mode == PerfMode::Max {
-        config.ac_state = active_device_state;
-    }
+    config.repair_for_startup(ac_power, force_ac_max_profile);
 
     let mut state = ProgramState::new(config.ac_state, fan_actual)?;
     state.ac_power = ac_power;
@@ -1009,7 +1235,12 @@ fn init(
     if state.ac_power == false {
         state.device_state = state.battery_state.clone()
     }
-    state.update(tray_icon, state.device_state, device)?;
+    state.update(
+        tray_icon,
+        state.device_state,
+        device,
+        ProfileBucket::from_ac_power(ac_power),
+    )?;
     Ok(state)
 }
 
@@ -1035,12 +1266,21 @@ fn efficiency_mode() {
 }
 
 fn main() -> Result<()> {
+    // Log startup errors too; as a windows_subsystem app there is no console to see them.
+    let result = run();
+    if let Err(e) = &result {
+        log::error!("exiting with error: {:?}", e);
+    }
+    result
+}
+
+fn run() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         // Initialize GTK for tray icon on Linux
         gtk::init().map_err(|_| anyhow::anyhow!("Failed to initialize GTK"))?;
     }
-    
+
     #[cfg(target_os = "windows")]
     efficiency_mode();
 
@@ -1053,6 +1293,11 @@ fn main() -> Result<()> {
 
     init_logging_to_file()?;
     log::info!("{0} starting {1} {0}", "==".repeat(20), PKG_NAME);
+
+    // Panics otherwise vanish (no console), so the tray just disappears with no trace.
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("panic, exiting: {}", info);
+    }));
 
     let device = match device::Device::detect() {
         Ok(d) => {
@@ -1086,14 +1331,22 @@ fn main() -> Result<()> {
 
     // loop through the default start up sequence to initialise the device.
     for element in device.info().init_cmds {
-        command::send_command(&device, *element, &[0,0,0,0])?;
+        command::send_command(&device, *element, &[0, 0, 0, 0])?;
     }
 
-    event_loop.run(move |_, _, control_flow| {
+    event_loop.run(move |event, _, control_flow| {
+        if let tao::event::Event::LoopDestroyed = event {
+            log::info!("exiting: event loop closed (Quit menu or Windows ended the app)");
+            return;
+        }
+
         let now = std::time::Instant::now();
         *control_flow = ControlFlow::WaitUntil(now + std::time::Duration::from_millis(1000));
 
         if let Err(e) = (|| -> Result<()> {
+            state.ac_power = get_power_state()?;
+            let profile_bucket = ProfileBucket::from_ac_power(state.ac_power);
+
             if let Ok(event) = menu_channel.try_recv() {
                 log::info!("Menu Event {:?}", event.id);
                 if event.id == MenuId("dgpu_terminate_proc".to_string()) {
@@ -1102,36 +1355,44 @@ fn main() -> Result<()> {
                 } else {
                     let new_device_state = state.handle_event(event.id.as_ref())?;
                     log::info!("new_device_state 1 {:?}", new_device_state);
-                    state.update(&mut tray_icon, new_device_state, &device)?;
+                    state.update(&mut tray_icon, new_device_state, &device, profile_bucket)?;
                 }
             }
 
             if matches!(tray_channel.try_recv(), Ok(event) if event.click_type == tray_icon::ClickType::Left) {
                 let new_device_state = state.get_next_perf_mode();
                 log::info!("new_device_state 2 {:?}", new_device_state);
-                state.update(&mut tray_icon, new_device_state, &device)?;
+                state.update(&mut tray_icon, new_device_state, &device, profile_bucket)?;
             }
 
-            state.ac_power = get_power_state()?;
             if state.ac_power && state.device_state != state.ac_state {
                 let new_device_state = state.ac_state.clone();
                 log::info!("new_device_state 3 {:?}", new_device_state);
-                state.update(&mut tray_icon, new_device_state, &device)?;
+                state.update(&mut tray_icon, new_device_state, &device, profile_bucket)?;
             } else if state.ac_power == false && state.device_state != state.battery_state {
                 let new_device_state = state.battery_state.clone();
                 log::info!("new_device_state 3 {:?}", new_device_state);
-                state.update(&mut tray_icon, new_device_state, &device)?;
-            } 
+                state.update(&mut tray_icon, new_device_state, &device, profile_bucket)?;
+            }
 
             if now > last_device_state_check_timestamp + std::time::Duration::from_secs(10)
             {
                 last_device_state_check_timestamp = now;
                 state.fan_actual =  get_fan_rpm(&device)?;
-                let active_device_state = DeviceState::read(&device)?;
+                state.ec_readings = EcReadings::read(&device);
+                let active_device_state = DeviceState::read_with_retry(&device)?;
                 if active_device_state != state.device_state {
-                    log::warn!("overriding externally modified state {:?},",
-                              active_device_state);
-                    state.update(&mut tray_icon, state.device_state, &device)?;
+                    if state.device_state.differs_only_lights(&active_device_state) {
+                        log::info!(
+                            "adopting external lights change {:?}",
+                            active_device_state.lights_mode
+                        );
+                        state.update(&mut tray_icon, active_device_state, &device, profile_bucket)?;
+                    } else {
+                        log::warn!("reapplying tray state after external EC change {:?},",
+                                  active_device_state);
+                        state.update(&mut tray_icon, state.device_state, &device, profile_bucket)?;
+                    }
                } else {
                     tray_icon.set_tooltip(Some(state.tooltip()?))?;
                }
