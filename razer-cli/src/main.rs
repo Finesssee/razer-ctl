@@ -2,8 +2,8 @@ use librazer::command;
 use librazer::device;
 use librazer::feature;
 use librazer::types::{
-    BatteryCare, CpuBoost, FanMode, FanZone, GpuBoost, LightsAlwaysOn, LogoMode, MaxFanSpeedMode,
-    PerfMode, Toggle,
+    BatteryCare, CpuBoost, FanMode, GpuBoost, LightsAlwaysOn, LogoMode, MaxFanSpeedMode, PerfMode,
+    Toggle,
 };
 
 use librazer::feature::Feature;
@@ -13,6 +13,8 @@ use clap::{arg, Command};
 use log::info;
 use std::process::Command as procCommand;
 use sysinfo::{ProcessExt, Signal, System, SystemExt};
+
+mod report;
 
 trait Cli: feature::Feature {
     fn cmd(&self) -> Option<Command> {
@@ -58,7 +60,7 @@ macro_rules! impl_unary_handle_with_arg_cli {
 }
 
 macro_rules! impl_unary_cli {
-    (<$feature_type:ty><$arg_type:ty>($desc:literal,$arg_desc:literal,$setter:path,$getter:path)) => {
+    (<$feature_type:ty><$arg_type:ty>($desc:literal,$arg_desc:literal,$setter:path)) => {
         impl Cli for $feature_type {
             fn cmd(&self) -> Option<Command> {
                 Some(
@@ -74,7 +76,6 @@ macro_rules! impl_unary_cli {
                         let arg = matches.get_one::<$arg_type>("ARG").unwrap();
                         $setter(device, *arg)
                     }
-                    Some(("info", _)) => Ok(println!("{}: {:?}", self.name(), $getter(device))),
                     _ => Ok(()),
                 }
             }
@@ -83,10 +84,10 @@ macro_rules! impl_unary_cli {
     }
 }
 
-impl_unary_cli! {<feature::KbdBacklight><u8>("Set keyboard backlight brightness", "Number in range [0, 255]", command::set_keyboard_brightness, command::get_keyboard_brightness)}
-impl_unary_cli! {<feature::LidLogo><LogoMode>("Set lid logo mode", "", command::set_logo_mode, command::get_logo_mode)}
-impl_unary_cli! {<feature::LightsAlwaysOn><LightsAlwaysOn>("Set lights always on", "", command::set_lights_always_on, command::get_lights_always_on)}
-impl_unary_cli! {<feature::LocalDimming><Toggle>("Set display local dimming", "", command::set_local_dimming, command::get_local_dimming)}
+impl_unary_cli! {<feature::KbdBacklight><u8>("Set keyboard backlight brightness", "Number in range [0, 255]", command::set_keyboard_brightness)}
+impl_unary_cli! {<feature::LidLogo><LogoMode>("Set lid logo mode", "", command::set_logo_mode)}
+impl_unary_cli! {<feature::LightsAlwaysOn><LightsAlwaysOn>("Set lights always on", "", command::set_lights_always_on)}
+impl_unary_cli! {<feature::LocalDimming><Toggle>("Set display local dimming", "", command::set_local_dimming)}
 
 impl Cli for feature::BatteryCare {
     fn cmd(&self) -> Option<Command> {
@@ -130,8 +131,7 @@ impl Cli for feature::BatteryCare {
                     Ok(())
                 }
                 Some(("get", _)) => {
-                    let current = command::get_battery_care(device)?;
-                    info!("Current battery care: {}%", current.to_percent());
+                    report::row("Battery care", report::battery_care(device));
                     Ok(())
                 }
                 Some(("charge-full-once", matches)) => command::set_charge_full_once(
@@ -140,15 +140,6 @@ impl Cli for feature::BatteryCare {
                 ),
                 _ => Ok(()),
             },
-            Some(("info", _)) => {
-                let current = command::get_battery_care(device)?;
-                info!("{}: {}%", self.name(), current.to_percent());
-                println!(
-                    "charge-full-once: {:?}",
-                    command::get_charge_full_once(device)
-                );
-                Ok(())
-            }
             _ => Ok(()),
         }
     }
@@ -205,27 +196,6 @@ fn apply_max_profile(device: &device::Device, matches: &clap::ArgMatches) -> Res
     command::set_max_performance_profile(device)
 }
 
-/// Two EC sensors are CPU then GPU on the Blade 16 (2023); other layouts are listed by index.
-fn format_temperatures(temps: &[u8]) -> String {
-    match temps {
-        [cpu, gpu] => format!("CPU {} °C, GPU {} °C", cpu, gpu),
-        _ => temps
-            .iter()
-            .enumerate()
-            .map(|(i, t)| format!("sensor {} {} °C", i + 1, t))
-            .collect::<Vec<_>>()
-            .join(", "),
-    }
-}
-
-fn format_watts(watts: Option<u16>) -> String {
-    match watts {
-        Some(0) => "none".to_string(),
-        Some(w) => format!("{} W", w),
-        None => "unknown".to_string(),
-    }
-}
-
 struct ProfileCommand;
 
 impl Feature for ProfileCommand {
@@ -269,69 +239,16 @@ impl Feature for StatusCommand {
 
 impl Cli for StatusCommand {
     fn cmd(&self) -> Option<Command> {
-        Some(clap::Command::new(self.name()).about("Show EC state and NVIDIA power limits"))
+        Some(
+            clap::Command::new(self.name())
+                .about("Show device state, NVIDIA power and Razer app conflicts"),
+        )
     }
 
     fn handle(&self, device: &device::Device, matches: &clap::ArgMatches) -> Result<()> {
         match matches.subcommand() {
             Some((ident, _)) if ident == self.name() => {
-                println!("Device: {:?}", device.info);
-                println!("lid-logo: {:?}", command::get_logo_mode(device));
-                println!(
-                    "lights-always-on: {:?}",
-                    command::get_lights_always_on(device)
-                );
-                println!(
-                    "kbd-backlight: {:?}",
-                    command::get_keyboard_brightness(device)
-                );
-
-                match command::get_perf_mode(device) {
-                    Ok((perf_mode, fan_mode)) => {
-                        println!("Performance: Ok(({:?}, {:?}))", perf_mode, fan_mode);
-                        if matches!(perf_mode, PerfMode::Custom | PerfMode::Hyperboost) {
-                            println!("CPU: {:?}", command::get_cpu_boost(device));
-                            println!("GPU: {:?}", command::get_gpu_boost(device));
-                        }
-
-                        match fan_mode {
-                            FanMode::Auto | FanMode::ForceAuto => {
-                                println!("Fan: {:?}", fan_mode)
-                            }
-                            FanMode::Manual => println!(
-                                "Fan set to: Manual@{:?} RPM",
-                                command::get_fan_rpm(device, FanZone::Zone1)
-                            ),
-                        }
-                    }
-                    Err(e) => println!("Performance: Err({})", e),
-                }
-
-                println!(
-                    "Fan actual: {:?} RPM",
-                    command::get_fan_actual_rpm(device, FanZone::Zone1)
-                );
-
-                match command::get_temperatures(device) {
-                    Ok(temps) => println!("Temperatures: {}", format_temperatures(&temps)),
-                    Err(e) => println!("Temperatures: Err({})", e),
-                }
-                match command::get_adapter_wattage(device) {
-                    Ok(adapter) => println!(
-                        "Charger: {} (recommended {}){}",
-                        format_watts(adapter.connected),
-                        format_watts(adapter.recommended),
-                        if adapter.is_undersized() {
-                            ", undersized: max profile is blocked"
-                        } else {
-                            ""
-                        }
-                    ),
-                    Err(e) => println!("Charger: Err({})", e),
-                }
-
-                print_nvidia_power_limits();
-                print_razer_conflicts();
+                report::print(device, true);
                 Ok(())
             }
             _ => Ok(()),
@@ -413,26 +330,6 @@ impl Cli for feature::Fan {
                     _ => Ok(()),
                 }
             }
-            Some(("info", _)) => {
-                match command::get_perf_mode(device) {
-                    Ok((_, fan_mode @ (FanMode::Auto | FanMode::ForceAuto))) => {
-                        println!("Fan: {:?}", fan_mode)
-                    }
-                    Ok((_, fan_mode @ FanMode::Manual)) => {
-                        println!(
-                            "Fan set to: {:?}@{:?} RPM",
-                            fan_mode,
-                            command::get_fan_rpm(device, FanZone::Zone1)
-                        )
-                    }
-                    Err(e) => println!("{}", e),
-                };
-                println!(
-                    "Fan actual: {:?} RPM",
-                    command::get_fan_actual_rpm(device, FanZone::Zone1)
-                );
-                Ok(())
-            }
             _ => Ok(()),
         }
     }
@@ -460,37 +357,6 @@ impl Cli for feature::Perf {
                 impl_unary_handle_cli! {<PerfMode>(matches, device, "mode", "MODE", command::set_perf_mode)}
                 impl_unary_handle_cli! {<CpuBoost>(matches, device, "cpu", "CPU", command::set_cpu_boost)}
                 impl_unary_handle_cli! {<GpuBoost>(matches, device, "gpu", "GPU", command::set_gpu_boost)}
-                Ok(())
-            }
-            Some(("info", _)) => {
-                let perf_mode = command::get_perf_mode(device);
-                println!("Performance: {:?}", perf_mode);
-                if let Ok((PerfMode::Custom | PerfMode::Hyperboost, _)) = perf_mode {
-                    let cpu_boost = command::get_cpu_boost(device);
-                    let gpu_boost = command::get_gpu_boost(device);
-                    println!("CPU: {:?}", cpu_boost);
-                    println!("GPU: {:?}", gpu_boost);
-
-                    if matches!(perf_mode, Ok((PerfMode::Custom, _)))
-                        && matches!(
-                            cpu_boost,
-                            Ok(CpuBoost::Boost) | Ok(CpuBoost::SynapseOverclock)
-                        )
-                        && matches!(gpu_boost, Ok(GpuBoost::High))
-                    {
-                        println!(
-                            "Max Fan Speed: {:?}",
-                            command::get_max_fan_speed_mode(device)
-                        )
-                    }
-                }
-                /* Test command code
-                let response = command::send_command(
-                    device,
-                    0x0d88,
-                    &[0, 1, 0]);
-                    println!("Rssponse: {:?}",response);
-                */
                 Ok(())
             }
             _ => Ok(()),
@@ -554,58 +420,6 @@ fn taskkill() -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn print_nvidia_power_limits() {
-    match procCommand::new("nvidia-smi")
-        .args(["-q", "-d", "POWER"])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let trimmed = line.trim();
-                if (trimmed.starts_with("Instantaneous Power Draw")
-                    || trimmed.starts_with("Current Power Limit")
-                    || trimmed.starts_with("Default Power Limit")
-                    || trimmed.starts_with("Max Power Limit"))
-                    && !trimmed.ends_with(": N/A")
-                {
-                    println!("NVIDIA {}", trimmed);
-                }
-            }
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            println!("NVIDIA power: unavailable ({})", stderr.trim());
-        }
-        Err(e) => println!("NVIDIA power: unavailable ({})", e),
-    }
-}
-
-fn print_razer_conflicts() {
-    let mut system = System::new_all();
-    system.refresh_processes();
-
-    let mut found = false;
-    for process in system.processes().values() {
-        let name = process.name();
-        if name.contains("RazerAppEngine")
-            || name.contains("Synapse")
-            || name.contains("RazerCentral")
-            || name.contains("Cortex")
-        {
-            if !found {
-                println!("Razer process conflicts:");
-                found = true;
-            }
-            println!("  {} ({})", name, process.pid());
-        }
-    }
-
-    if !found {
-        println!("Razer process conflicts: none detected");
-    }
 }
 
 const STARTUP_MAX_VALUE: &str = "razer-ctl max profile";
@@ -713,7 +527,8 @@ fn handle(
     features: &Vec<Box<dyn Cli>>,
 ) -> Result<()> {
     if let Some(("info", _)) = matches.subcommand() {
-        println!("Device: {:?}", device.info);
+        report::print(device, false);
+        return Ok(());
     }
 
     for f in features {
@@ -733,7 +548,7 @@ fn gen_cli_features(feature_list: &[&str]) -> Vec<Box<dyn Cli>> {
 fn main() -> Result<()> {
     env_logger::init();
 
-    let info_cmd = clap::Command::new("info").about("Get device info");
+    let info_cmd = clap::Command::new("info").about("Show device state");
     let auto_cmd = clap::Command::new("auto")
         .about("Automatically detect supported Razer device and enable device specific features")
         .subcommand(info_cmd.clone())
