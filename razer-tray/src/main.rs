@@ -46,6 +46,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_off_bad_read_is_ignored_but_repeated_change_is_kept() {
+        let expected = ConfigState::default().ac_state;
+        let bad = DeviceState {
+            fan_speed: FanSpeed::Manual(0),
+            ..expected
+        };
+
+        let after_one_bad_read = DeviceState::confirm_read(&expected, bad, || Ok(expected));
+        assert_eq!(after_one_bad_read.unwrap(), expected);
+
+        let after_two_bad_reads = DeviceState::confirm_read(&expected, bad, || Ok(bad));
+        assert_eq!(after_two_bad_reads.unwrap(), bad);
+
+        let matching = DeviceState::confirm_read(&expected, expected, || {
+            panic!("a matching read must not be re-read")
+        });
+        assert_eq!(matching.unwrap(), expected);
+    }
+
+    #[test]
     fn default_ac_profile_is_low_latency_gaming_profile() {
         let config = ConfigState::default();
 
@@ -183,6 +203,24 @@ struct DeviceState {
 type Result<T> = std::result::Result<T, Error>;
 
 impl DeviceState {
+    /// The EC state to act on after a periodic read. A read that disagrees with the tray is
+    /// only trusted if a second read agrees with it; single bad reads (e.g. a fan target of 0)
+    /// happen and shouldn't make the tray re-apply its whole profile.
+    fn confirm_read(
+        expected: &Self,
+        first: Self,
+        reread: impl FnOnce() -> Result<Self>,
+    ) -> Result<Self> {
+        if first == *expected {
+            return Ok(first);
+        }
+        let second = reread()?;
+        if second == *expected {
+            log::info!("ignoring one-off EC read {:?}", first);
+        }
+        Ok(second)
+    }
+
     fn differs_only_lights(&self, other: &Self) -> bool {
         self.lights_mode != other.lights_mode
             && self.perf_mode == other.perf_mode
@@ -1386,7 +1424,14 @@ fn run() -> Result<()> {
                 last_device_state_check_timestamp = now;
                 state.fan_actual =  get_fan_rpm(&device)?;
                 state.ec_readings = EcReadings::read(&device);
-                let active_device_state = DeviceState::read_with_retry(&device)?;
+                let active_device_state = DeviceState::confirm_read(
+                    &state.device_state,
+                    DeviceState::read_with_retry(&device)?,
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        DeviceState::read_with_retry(&device)
+                    },
+                )?;
                 if active_device_state != state.device_state {
                     if state.device_state.differs_only_lights(&active_device_state) {
                         log::info!(
